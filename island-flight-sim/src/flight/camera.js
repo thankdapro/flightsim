@@ -22,7 +22,15 @@ export const VIEW_LABELS = {
 
 // Left seat, eye height chosen so you look *over* the engine cowling — the
 // single most important measurement in a cockpit view.
-const EYE = new THREE.Vector3(-0.24, 0.3, -0.28);
+/**
+ * Pilot's eye point, in the aeroplane's own frame. Left seat, and set back far
+ * enough from the panel to actually see out: the instruments sit at z = -0.92
+ * and the glareshield at y = 0.02, so sitting at z = -0.28 put your nose on the
+ * glass and filled two thirds of the screen with dials, with no runway visible
+ * at all. Roughly a metre back and a hand's width higher is what a real light
+ * aircraft feels like.
+ */
+const EYE = new THREE.Vector3(-0.24, 0.46, 0.06);
 
 export class CameraRig {
   constructor(camera, aircraft) {
@@ -166,8 +174,14 @@ export class CameraRig {
       cam.fov = lerp(cam.fov, 64, clamp(dt * 3, 0, 1));
       cam.near = 0.2;
     } else if (this.mode === 'tower') {
-      // Fixed at the control tower cab, tracking the aeroplane.
-      cam.position.set(40, RUNWAY.elev + 30, -206);
+      // On the tower balcony, tracking the aeroplane.
+      //
+      // This used to sit at (40, elev+30, -206) — the exact centre of the
+      // glazed cab, whose cylinder is 8.5 m across at that height. The view was
+      // through blue tinted glass in every direction with the roof overhead.
+      // Standing just outside the cab on the runway side gives a clean view and
+      // still reads as the tower.
+      cam.position.set(40, RUNWAY.elev + 29, -206 + 11);
       cam.lookAt(pos);
       const dist = cam.position.distanceTo(pos);
       // Zoom in as the aeroplane gets further away, like a tower controller

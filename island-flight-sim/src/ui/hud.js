@@ -154,6 +154,7 @@ export class Hud {
     this.btnCamera = mkBtn('◉', 'camera', 'Change camera (C)');
     this.btnGuide = mkBtn('⋀', 'guide', 'Guidance lines on/off (N)');
     this.btnAuto = mkBtn('AP', 'autopilot', 'Autopilot on/off (P)');
+    this.btnCinematic = mkBtn('▣', 'hideUi', 'Hide the interface for a clean shot (U)');
     this.btnRestart = mkBtn('↻', 'restart', 'Restart');
     this.btnAirport = mkBtn('⌂', 'airport', 'Return to airport');
     this.btnMute = mkBtn('🔊', 'mute', 'Mute sound (M)');
@@ -483,7 +484,10 @@ export class Hud {
       const bearing = (Math.atan2(dx, -dz) * 180) / Math.PI;
       const relB = ((bearing - r.heading + 540) % 360) - 180;
       this.waypoint.style.display = '';
-      this.waypointArrow.style.transform = `rotate(${relB}deg)`;
+      // The glyph points east when it is not rotated, but a relative bearing of
+      // zero means "dead ahead" — so it needs a quarter turn taken off, or the
+      // arrow sends you 90 degrees off every single time.
+      this.waypointArrow.style.transform = `rotate(${relB - 90}deg)`;
       const distText = dist > 1200 ? `${(dist / 1000).toFixed(1)} km` : `${Math.round(dist / 10) * 10} m`;
       const txt = `${target.label} · ${distText}`;
       if (this.lastValues.wp !== txt) {

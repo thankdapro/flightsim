@@ -416,8 +416,12 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   const bladeMat = new THREE.MeshStandardMaterial({ map: propTexture(), roughness: 0.5, metalness: 0.3 });
   const blades = new THREE.Group();
   for (let i = 0; i < 2; i++) {
-    const bl = new THREE.Mesh(new THREE.BoxGeometry(0.14, 1.85, 0.045), bladeMat);
-    bl.geometry.translate(0, 0.92, 0);
+    // Blade length matches the blur disc it fades into (radius ~1.05 m, so a
+    // 2.1 m propeller — right for an aeroplane this size). It used to reach
+    // 1.85 m, which from the cockpit looked like a grey plank laid across the
+    // windscreen and stuck out well past the disc from outside.
+    const bl = new THREE.Mesh(new THREE.BoxGeometry(0.13, 1.0, 0.045), bladeMat);
+    bl.geometry.translate(0, 0.52, 0);
     bl.rotation.z = i * Math.PI;
     bl.rotation.y = 0.34 * (i === 0 ? 1 : -1);
     bl.castShadow = true;

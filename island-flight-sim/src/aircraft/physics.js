@@ -114,6 +114,8 @@ export class Aircraft {
     this.starting = 0;
     this.rpm = 0;
     this.fuel = SPEC.fuelCapacity;
+    /** Flat 1% of the tank every 30 s when on. Settings -> Flying. */
+    this.realisticFuel = false;
     this.mode = 'simplified';
 
     // Derived readouts.
@@ -353,7 +355,14 @@ export class Aircraft {
     const spool = targetRpm > this.rpm ? 2.4 : 1.1;
     this.rpm += (targetRpm - this.rpm) * Math.min(1, dt * spool);
     if (this.engineOn) {
-      this.fuel = Math.max(0, this.fuel - SPEC.fuelBurnMax * (0.16 + this.controls.throttle * 0.84) * dt);
+      // Realistic fuel: a flat one per cent of the tank every thirty seconds,
+      // so a full tank lasts fifty minutes whatever you do with the throttle.
+      // It is far thirstier than the default burn — that is the point. Off by
+      // default; Settings → Flying.
+      const burn = this.realisticFuel
+        ? SPEC.fuelCapacity * (0.01 / 30)
+        : SPEC.fuelBurnMax * (0.16 + this.controls.throttle * 0.84);
+      this.fuel = Math.max(0, this.fuel - burn * dt);
       const pct = this.fuel / SPEC.fuelCapacity;
       if (pct < 0.12 && !this._lowFuelWarned) {
         this._lowFuelWarned = true;

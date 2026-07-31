@@ -160,6 +160,19 @@ export class MissionRunner {
       const t = step.target(this.ctx());
       if (t) return { pos: t, label: step.targetLabel || 'Target' };
     }
+    // Some steps are about the aeroplane rather than a place — "rotate",
+    // "climb away". They name no target, and without this the guidance falls
+    // back to the runway, so the arrow and the wingtip rails swing round and
+    // point at the runway you have just left while you are still climbing off
+    // it. Look ahead to the next step that does name somewhere: that is where
+    // you are actually going.
+    const ctx = this.ctx();
+    for (let i = this.stepIndex + 1; i < this.def.steps.length; i++) {
+      const next = this.def.steps[i];
+      if (!next.target) continue;
+      const t = next.target(ctx);
+      if (t) return { pos: t, label: next.targetLabel || 'Target' };
+    }
     return null;
   }
 

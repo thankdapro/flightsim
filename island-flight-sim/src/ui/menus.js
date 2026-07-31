@@ -411,6 +411,7 @@ export class Menus {
           <label class="check"><input type="checkbox" data-set="gamepad"><span>Use a gamepad if one is plugged in</span></label>
           <label class="check"><input type="checkbox" data-set="showHints"><span>Repeat hints if I get stuck</span></label>
           <label class="check"><input type="checkbox" data-set="guidance"><span>Show guidance lines to the runway or target (N)</span></label>
+          <label class="check"><input type="checkbox" data-set="realisticFuel"><span>Realistic fuel — the tank drains 1% every 30 seconds, so you have to plan</span></label>
           <label class="check"><input type="checkbox" data-set="randomWinds"><span>Random winds — the wind wanders and gusts blow through</span></label>
           <p class="hint">With random winds on, the wind drifts around the speed and direction you chose and a gust rolls
           through every half minute or so. It makes landings much more interesting. Leave it off while you are learning.</p>

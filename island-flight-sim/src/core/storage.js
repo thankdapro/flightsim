@@ -28,6 +28,8 @@ export const DEFAULT_SETTINGS = {
   guidance: true,
   // Wandering wind with occasional gusts. Off while you are learning.
   randomWinds: false,
+  // Flat 1% of the tank every 30 seconds. Off by default.
+  realisticFuel: false,
   atcChatter: true,
   weather: { time: 'day', condition: 'clear', windSpeedKts: 4, windDirDeg: 90 },
 };

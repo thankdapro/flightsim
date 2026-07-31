@@ -55,7 +55,7 @@ const FPM = UNITS.FPM;
 
 /** Bumped whenever the game changes. Printed on boot so you can tell at a
  *  glance whether a browser is running a stale cached copy. */
-export const BUILD = 'v5 — five maps, autopilot, guidance rails, random winds';
+export const BUILD = 'v8 — cockpit + tower views, propeller, arrow fixes';
 
 const loadEl = document.getElementById('loading');
 const loadBar = document.getElementById('load-bar');
@@ -162,6 +162,7 @@ class Game {
     await this.frame();
     this.aircraft = new Aircraft();
     this.aircraft.mode = this.settings.flightMode;
+    this.aircraft.realisticFuel = !!this.settings.realisticFuel;
     this.model = createAircraftModel();
     this.scene.add(this.model);
     this.cockpit = createCockpit({ highContrast: this.settings.highContrast });
@@ -713,10 +714,22 @@ class Game {
       case 'autopilot':
         this.toggleAutopilot();
         break;
+      case 'hideUi':
+        // Cinematic view. The button disappears along with everything else, so
+        // the keyboard is the only way back — say so before it goes.
+        this.toggleHideUi();
+        break;
       case 'help':
         this.hud.toggleControls(this.input.bindings, keyLabel, ACTIONS);
         break;
     }
+  }
+
+  /** Hide the whole interface for a clean shot. U is the way back. */
+  toggleHideUi() {
+    const hidden = this.hud.toggleHidden();
+    if (!hidden) this.hud.notify('Interface back on', 'info', 1.6);
+    return hidden;
   }
 
   toggleGuide() {
@@ -801,6 +814,15 @@ class Game {
     } else if (path === 'guidance') {
       this.navGuide.setEnabled(value);
       this.hud.setGuideActive(value);
+    } else if (path === 'realisticFuel') {
+      this.aircraft.realisticFuel = value;
+      this.hud.notify(
+        value
+          ? 'Realistic fuel on — a full tank lasts about 50 minutes. Watch the gauge.'
+          : 'Realistic fuel off',
+        'info',
+        3.5
+      );
     } else if (path === 'randomWinds') {
       this.weather.setRandomWinds(value);
       this.hud.notify(
@@ -1079,10 +1101,7 @@ class Game {
     if (input.pressed('help')) this.hud.toggleControls(this.input.bindings, keyLabel, ACTIONS);
     if (input.pressed('guide')) this.toggleGuide();
     if (input.pressed('autopilot')) this.toggleAutopilot();
-    if (input.pressed('hideUi')) {
-      const hidden = this.hud.toggleHidden();
-      if (!hidden) this.hud.notify('Interface back on', 'info', 1.6);
-    }
+    if (input.pressed('hideUi')) this.toggleHideUi();
     if (input.pressed('mute')) this.hudAction('mute');
   }
 
