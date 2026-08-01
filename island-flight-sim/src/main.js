@@ -55,7 +55,7 @@ const FPM = UNITS.FPM;
 
 /** Bumped whenever the game changes. Printed on boot so you can tell at a
  *  glance whether a browser is running a stale cached copy. */
-export const BUILD = 'v10 — cockpit controls, ATC voice options';
+export const BUILD = 'v11 — keyboard focus fix, rails on the ground, Esc restores UI';
 
 const loadEl = document.getElementById('loading');
 const loadBar = document.getElementById('load-bar');
@@ -654,6 +654,13 @@ class Game {
   pause() {
     if (this.state !== 'flying') return;
     this.state = 'paused';
+    // Always a way out. If the interface is hidden for a clean shot, pausing
+    // brings it back — otherwise a player who forgets the key is stuck looking
+    // at a game with no controls and no menu.
+    if (this.hud.hidden) {
+      this.hud.setHidden(false);
+      this.hud.notify('Interface restored — press U to hide it again', 'info', 3);
+    }
     const r = this.aircraft.readouts();
     this.menus.setPauseInfo(`
       <div class="pause-grid">
@@ -1215,7 +1222,13 @@ class Game {
     // there is nothing else to aim at.
     if (this.navGuide) {
       let guideTarget = this.activeTarget ? this.activeTarget.pos : null;
-      if (!guideTarget && this.state === 'flying' && !ac.onGround) guideTarget = RUNWAY.touchdown;
+      // On the ground with nothing to aim at, point down the runway rather than
+      // showing nothing. The rails vanishing the moment you land makes the
+      // whole feature look broken, and lined up for take-off is exactly when a
+      // beginner wants to know which way "straight ahead" is.
+      if (!guideTarget && this.state === 'flying') {
+        guideTarget = ac.onGround ? RUNWAY.thresholdEast : RUNWAY.touchdown;
+      }
       this.navGuide.update(
         dt,
         this.state === 'flying' ? guideTarget : null,

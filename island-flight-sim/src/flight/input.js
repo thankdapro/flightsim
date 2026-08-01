@@ -80,8 +80,20 @@ export class Input {
     this.throttleTarget = 0;
 
     this._onKeyDown = (e) => {
-      // Let the browser handle typing in inputs, and never swallow devtools keys.
-      if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+      // Let the browser handle typing, but only for things you actually type
+      // into. This used to bail on any INPUT or SELECT, which meant that after
+      // touching a slider or a dropdown in Settings the focus stayed on it and
+      // *every* game key stopped working — including the one that brings the
+      // interface back. A range slider is not a text field.
+      const el = e.target;
+      if (el) {
+        const tag = el.tagName;
+        const typing =
+          tag === 'TEXTAREA' ||
+          el.isContentEditable ||
+          (tag === 'INPUT' && !/^(range|checkbox|radio|button|submit|color)$/i.test(el.type || 'text'));
+        if (typing) return;
+      }
       if (e.code === 'Tab') return;
       if (this.captureNext) {
         e.preventDefault();

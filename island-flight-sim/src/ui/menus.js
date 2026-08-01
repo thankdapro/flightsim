@@ -719,6 +719,10 @@ export class Menus {
     this.layer.hidden = true;
     this.current = null;
     for (const key in this.screens) this.screens[key].hidden = true;
+    // Hand the keyboard back to the aeroplane. A slider or dropdown that keeps
+    // focus after the menu closes swallows key presses meant for flying.
+    const el = document.activeElement;
+    if (el && el !== document.body && this.root.contains(el) && el.blur) el.blur();
   }
 
   get isOpen() {
