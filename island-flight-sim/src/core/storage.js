@@ -31,6 +31,8 @@ export const DEFAULT_SETTINGS = {
   // Flat 1% of the tank every 30 seconds. Off by default.
   realisticFuel: false,
   atcChatter: true,
+  // 'radio' (synthesised, no TTS) | 'speech' (browser TTS) | 'recordings'
+  atcVoice: 'radio',
   weather: { time: 'day', condition: 'clear', windSpeedKts: 4, windDirDeg: 90 },
 };
 

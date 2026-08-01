@@ -770,7 +770,9 @@ export function createCockpit({ highContrast = false } = {}) {
     new THREE.MeshStandardMaterial({ color: 0x2b2f35, roughness: 0.4, metalness: 0.6 })
   );
   column.rotation.x = Math.PI / 2;
-  column.position.z = 0.2;
+  // Forwards, into the panel. It used to run backwards towards the pilot,
+  // which put a fat grey cylinder end-on in the middle of the windscreen.
+  column.position.z = -0.2;
   yoke.add(column);
   const hubMat = new THREE.MeshStandardMaterial({ color: 0x1c1f24, roughness: 0.5, metalness: 0.3 });
   const hub = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.06), hubMat);
@@ -786,30 +788,74 @@ export function createCockpit({ highContrast = false } = {}) {
     grip.position.set(side * 0.19, 0, 0);
     yoke.add(grip);
   }
-  yoke.position.set(-0.22, -0.36, -0.55);
+  // Yoke height matters more than it sounds. Sat down at -0.36 it was 53
+  // degrees below the pilot's eye line — completely outside the view, so the
+  // aeroplane appeared to have no controls at all. Up here it sits in the lower
+  // third of the windscreen where a real one does, and you can watch it move.
+  yoke.position.set(-0.24, -0.09, -0.5);
+  yoke.scale.setScalar(0.85);
   group.add(yoke);
 
-  // Throttle quadrant.
-  const quadrant = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.1, 0.22), shellMat);
-  quadrant.position.set(0.12, -0.56, -0.78);
+  /* ---------------- Throttle quadrant ---------------- */
+  // Three levers, the way a real light single is laid out: black throttle,
+  // blue propeller, red mixture, left to right, on the panel's lower centre.
+  const quadrant = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.13, 0.18), shellMat);
+  quadrant.position.set(0.14, -0.34, -0.8);
   group.add(quadrant);
-  const throttleLever = new THREE.Group();
-  const lever = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.2, 8), new THREE.MeshStandardMaterial({ color: 0x3a3f46, roughness: 0.35, metalness: 0.7 }));
-  lever.position.y = 0.1;
-  throttleLever.add(lever);
-  const knob = new THREE.Mesh(
-    new THREE.SphereGeometry(0.032, 12, 8),
-    new THREE.MeshStandardMaterial({ color: 0x1b1e22, roughness: 0.55 })
-  );
-  knob.position.y = 0.2;
-  throttleLever.add(knob);
-  throttleLever.position.set(0.06, -0.58, -0.74);
+
+  const makeLever = (colour, shape) => {
+    const g = new THREE.Group();
+    const stem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.013, 0.013, 0.19, 8),
+      new THREE.MeshStandardMaterial({ color: 0x3a3f46, roughness: 0.35, metalness: 0.7 })
+    );
+    stem.position.y = 0.095;
+    g.add(stem);
+    const mat = new THREE.MeshStandardMaterial({ color: colour, roughness: 0.5 });
+    // Real quadrants use shape as well as colour so you can find the right
+    // lever without looking: round throttle, flat-topped prop, ribbed mixture.
+    const knobGeo =
+      shape === 'flat'
+        ? new THREE.CylinderGeometry(0.032, 0.032, 0.03, 12)
+        : shape === 'ribbed'
+          ? new THREE.CylinderGeometry(0.026, 0.03, 0.055, 10)
+          : new THREE.SphereGeometry(0.033, 12, 8);
+    const k = new THREE.Mesh(knobGeo, mat);
+    k.position.y = 0.2;
+    g.add(k);
+    return g;
+  };
+
+  const throttleLever = makeLever(0x14171b, 'round');
+  throttleLever.position.set(0.03, -0.4, -0.78);
   group.add(throttleLever);
 
-  const mixture = throttleLever.clone();
-  mixture.position.x = 0.18;
-  mixture.children[1].material = new THREE.MeshStandardMaterial({ color: 0x8a1f1a, roughness: 0.5 });
+  const propLever = makeLever(0x1f4f9c, 'flat');
+  propLever.position.set(0.14, -0.4, -0.78);
+  group.add(propLever);
+
+  const mixture = makeLever(0x8a1f1a, 'ribbed');
+  mixture.position.set(0.25, -0.4, -0.78);
   group.add(mixture);
+
+  /* ---------------- Flap lever ---------------- */
+  // Sits right of the quadrant and steps through the same detents as the wing.
+  const flapBase = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 0.12), shellMat);
+  flapBase.position.set(0.4, -0.38, -0.76);
+  group.add(flapBase);
+  const flapLever = makeLever(0xd9dde3, 'flat');
+  flapLever.scale.setScalar(0.85);
+  flapLever.position.set(0.4, -0.4, -0.74);
+  group.add(flapLever);
+
+  /* ---------------- Trim wheel ---------------- */
+  const trimWheel = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.075, 0.075, 0.028, 20),
+    new THREE.MeshStandardMaterial({ color: 0x24272c, roughness: 0.6, metalness: 0.2 })
+  );
+  trimWheel.rotation.z = Math.PI / 2;
+  trimWheel.position.set(0.14, -0.5, -0.66);
+  group.add(trimWheel);
 
   // Rain on the windscreen (only visible when it is actually raining).
   const dropMat = new THREE.MeshBasicMaterial({
@@ -831,8 +877,18 @@ export function createCockpit({ highContrast = false } = {}) {
     const c = ac.controls;
     // Yoke: rotate for aileron, push/pull for elevator.
     yoke.rotation.z = lerp(yoke.rotation.z, -c.roll * 0.8, clamp(dt * 10, 0, 1));
-    yoke.position.z = lerp(yoke.position.z, -0.55 - c.pitch * 0.06, clamp(dt * 10, 0, 1));
+    yoke.position.z = lerp(yoke.position.z, -0.52 - c.pitch * 0.07, clamp(dt * 10, 0, 1));
+    // Levers rake forward as they are pushed in, exactly like the real thing.
     throttleLever.rotation.x = lerp(throttleLever.rotation.x, 0.5 - c.throttle * 0.9, clamp(dt * 8, 0, 1));
+    // Propeller lever tracks rpm; mixture leans off as you climb, which is what
+    // a pilot would actually be doing with it.
+    propLever.rotation.x = lerp(propLever.rotation.x, 0.5 - clamp(ac.rpm, 0, 1) * 0.85, clamp(dt * 5, 0, 1));
+    const lean = clamp((ac.pos.y - 300) / 2400, 0, 0.55);
+    mixture.rotation.x = lerp(mixture.rotation.x, -0.4 + lean, clamp(dt * 2, 0, 1));
+    // Flap lever steps down through the detents with the flaps themselves.
+    flapLever.rotation.x = lerp(flapLever.rotation.x, -0.45 + ac.flaps * 1.1, clamp(dt * 6, 0, 1));
+    // Trim wheel winds as the trim runs.
+    trimWheel.rotation.y = (ac.trim || 0) * 6;
     for (const p of pedals) {
       p.mesh.position.z = -0.86 + c.yaw * p.side * 0.05;
     }

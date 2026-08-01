@@ -9,7 +9,7 @@
  * Bump CACHE_VERSION when you change any game file.
  */
 
-const CACHE_VERSION = 'island-flight-v8';
+const CACHE_VERSION = 'island-flight-v10';
 
 const PRECACHE = [
   './',
@@ -68,7 +68,7 @@ const PRECACHE = [
 
 // Files that are useful but not required for the game to run. If one of these
 // fails to cache, offline play still works.
-const OPTIONAL = ['tests/selftest.js', 'README.md'];
+const OPTIONAL = ['assets/atc/manifest.json', 'tests/selftest.js', 'README.md'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

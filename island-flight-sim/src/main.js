@@ -55,7 +55,7 @@ const FPM = UNITS.FPM;
 
 /** Bumped whenever the game changes. Printed on boot so you can tell at a
  *  glance whether a browser is running a stale cached copy. */
-export const BUILD = 'v8 — cockpit + tower views, propeller, arrow fixes';
+export const BUILD = 'v10 — cockpit controls, ATC voice options';
 
 const loadEl = document.getElementById('loading');
 const loadBar = document.getElementById('load-bar');
@@ -790,6 +790,17 @@ class Game {
     } else if (path === 'music') {
       this.audio.setMusicEnabled(value);
       if (value && this.state === 'menu') this.audio.music.start();
+    } else if (path === 'atcVoice') {
+      this.audio.radio.setMode(value);
+      this.hud.notify(
+        value === 'speech'
+          ? "ATC now uses your device's speech voice"
+          : value === 'recordings'
+            ? 'ATC will play your own clips from assets/atc/ where you have them'
+            : 'ATC back to the synthesised radio',
+        'info',
+        3.2
+      );
     } else if (path === 'atcChatter') {
       this.audio.radio.backgroundChatter = value;
     } else if (path === 'flightMode') {
@@ -904,6 +915,7 @@ class Game {
     this.audio.setMuted(this.settings.muted);
     this.audio.setMusicEnabled(this.settings.music);
     this.audio.radio.backgroundChatter = this.settings.atcChatter;
+    this.audio.radio.setMode(this.settings.atcVoice || 'radio');
     if (this.settings.music && this.state === 'menu') this.audio.music.start();
   }
 

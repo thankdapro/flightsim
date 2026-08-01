@@ -431,6 +431,16 @@ export class Menus {
           <label class="field"><span>Music <b data-out="volumes.music"></b></span>
             <input type="range" min="0" max="1" step="0.05" data-set="volumes.music"></label>
           <label class="check"><input type="checkbox" data-set="music"><span>Play background music</span></label>
+          <label class="field"><span>ATC voices</span>
+            <select data-set="atcVoice">
+              <option value="radio">Radio chatter (default — no text-to-speech)</option>
+              <option value="speech">Your device's speech voice (text-to-speech)</option>
+              <option value="recordings">Recordings I have added myself</option>
+            </select></label>
+          <p class="hint">The default radio is built entirely from Web Audio — indistinct formant chatter through a
+          real radio chain, with the words as subtitles. No text-to-speech and no AI voices. The speech option uses your
+          operating system's own voice; it is text-to-speech, which is why it is not the default. The third option plays
+          clips you put in <code>assets/atc/</code> yourself.</p>
           <label class="check"><input type="checkbox" data-set="atcChatter"><span>Background radio chatter from other aircraft</span></label>
           <label class="check"><input type="checkbox" data-set="muted"><span>Mute everything</span></label>
           <p class="hint">Every sound is synthesised by the game — engine, wind, rain, tyres and the radio. Nothing is downloaded, so it all works offline.</p>
