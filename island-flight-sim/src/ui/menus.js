@@ -536,6 +536,7 @@ export class Menus {
             <button class="primary" data-act="resume">Resume flight</button>
             <button data-act="restart">Restart</button>
             <button data-act="airport">Return to airport</button>
+            <button data-act="freelook" data-freelook>Free look: off</button>
             <button data-act="settings">Settings</button>
             <button data-act="quit">Quit to menu</button>
           </div>
@@ -709,11 +710,31 @@ export class Menus {
     for (const key in this.screens) this.screens[key].hidden = key !== name;
     this.current = name;
     if (name === 'settings') this.renderKeymap();
+    if (name === 'pause') this.syncFreeLook();
     if (name !== 'settings') this.settingsReturn = null;
     // Move focus for keyboard users.
     const focusable = this.screens[name].querySelector('button, select, input, a');
     if (focusable) setTimeout(() => focusable.focus({ preventScroll: true }), 30);
   }
+
+
+
+  /**
+   * Draw the hand-inked frames for whatever is on screen. Called on every
+   * screen change because the shapes are sized to their elements, and an
+   * element that was hidden has no size to measure.
+   */
+  /** Show whether free look is on, on the pause-menu button. */
+  syncFreeLook(on) {
+    const btn = this.root.querySelector('[data-freelook]');
+    if (!btn) return;
+    const state = on === undefined ? this._freeLook : !!on;
+    this._freeLook = state;
+    btn.textContent = `Free look: ${state ? 'on' : 'off'}`;
+    btn.classList.toggle('is-live', state);
+  }
+
+
 
   hide() {
     this.layer.hidden = true;

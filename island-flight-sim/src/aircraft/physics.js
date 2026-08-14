@@ -357,8 +357,6 @@ export class Aircraft {
     if (this.engineOn) {
       // Realistic fuel: a flat one per cent of the tank every thirty seconds,
       // so a full tank lasts fifty minutes whatever you do with the throttle.
-      // It is far thirstier than the default burn — that is the point. Off by
-      // default; Settings → Flying.
       const burn = this.realisticFuel
         ? SPEC.fuelCapacity * (0.01 / 30)
         : SPEC.fuelBurnMax * (0.16 + this.controls.throttle * 0.84);

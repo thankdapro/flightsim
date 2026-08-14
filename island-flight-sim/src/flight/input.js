@@ -32,6 +32,13 @@ export const ACTIONS = {
   hideUi: { label: 'Hide / show the whole interface', group: 'View', default: ['KeyU'] },
   guide: { label: 'Guidance lines to the target', group: 'View', default: ['KeyN'] },
   autopilot: { label: 'Autopilot on / off', group: 'Engine', default: ['KeyP'] },
+  // Free look. These share the arrow keys with the throttle: whichever one is
+  // listening depends on whether free look is switched on, and the throttle
+  // always has Shift and Ctrl regardless.
+  lookUp: { label: 'Look up (free look on)', group: 'View', default: ['ArrowUp'] },
+  lookDown: { label: 'Look down (free look on)', group: 'View', default: ['ArrowDown'] },
+  lookLeft: { label: 'Look left (free look on)', group: 'View', default: ['ArrowLeft'] },
+  lookRight: { label: 'Look right (free look on)', group: 'View', default: ['ArrowRight'] },
   mute: { label: 'Mute sound', group: 'Game', default: ['KeyM'] },
 };
 
@@ -74,6 +81,15 @@ export class Input {
     this.lookYaw = 0;
     this.lookPitch = 0;
     this.rightDown = false;
+    /**
+     * Free look: move your head around the cockpit with the mouse or the
+     * arrow keys, without holding anything down. Off by default because it
+     * takes the arrow keys away from the throttle; toggled from the pause
+     * menu or Settings.
+     */
+    this.freeLook = false;
+    /** Seconds since you last moved your head, used to ease it back forward. */
+    this._lookIdle = 0;
 
     // Smoothed control outputs.
     this.out = { pitch: 0, roll: 0, yaw: 0, throttle: 0, brakes: 0 };
@@ -113,12 +129,13 @@ export class Input {
     this._onBlur = () => this.keys.clear();
 
     this._onMouseMove = (e) => {
-      if (!this.mouseEnabled && !this.rightDown) return;
+      if (!this.mouseEnabled && !this.rightDown && !this.freeLook) return;
       const dx = e.movementX || 0;
       const dy = e.movementY || 0;
-      if (this.rightDown) {
-        this.lookYaw = clamp(this.lookYaw - dx * 0.0035, -1.6, 1.6);
-        this.lookPitch = clamp(this.lookPitch - dy * 0.0035, -0.9, 0.9);
+      if (this.rightDown || (this.freeLook && !this.mouse.locked)) {
+        this.lookYaw = clamp(this.lookYaw - dx * 0.0035, -2.4, 2.4);
+        this.lookPitch = clamp(this.lookPitch - dy * 0.0035, -1.0, 0.75);
+        this._lookIdle = 0;
         return;
       }
       const s = 0.0022 * this.sensitivity;
@@ -241,6 +258,33 @@ export class Input {
     if (this.held('yawRight')) yawIn += 1;
     if (this.held('yawLeft')) yawIn -= 1;
 
+    // ---- Free look -------------------------------------------------------
+    // Arrow keys swing your head around the cockpit. They only do this while
+    // free look is on; otherwise they stay on the throttle, where beginners
+    // find them.
+    if (this.freeLook) {
+      const lookRate = 1.5 * dt;
+      let moved = false;
+      if (this.held('lookLeft')) { this.lookYaw += lookRate; moved = true; }
+      if (this.held('lookRight')) { this.lookYaw -= lookRate; moved = true; }
+      if (this.held('lookUp')) { this.lookPitch += lookRate; moved = true; }
+      if (this.held('lookDown')) { this.lookPitch -= lookRate; moved = true; }
+      this.lookYaw = clamp(this.lookYaw, -2.4, 2.4);
+      this.lookPitch = clamp(this.lookPitch, -1.0, 0.75);
+      this._lookIdle = moved ? 0 : this._lookIdle + dt;
+      // Ease the head back to straight ahead once you stop looking around, so
+      // you never end up flying an approach staring at the side window.
+      if (this._lookIdle > 1.6) {
+        const back = clamp((this._lookIdle - 1.6) * dt * 1.6, 0, 1);
+        this.lookYaw = lerp(this.lookYaw, 0, back);
+        this.lookPitch = lerp(this.lookPitch, 0, back);
+      }
+    } else if (!this.rightDown) {
+      // Not looking around: spring back promptly.
+      this.lookYaw = lerp(this.lookYaw, 0, clamp(dt * 3, 0, 1));
+      this.lookPitch = lerp(this.lookPitch, 0, clamp(dt * 3, 0, 1));
+    }
+
     // Mouse flying overrides the keyboard when it is moving.
     if (this.mouseEnabled) {
       // The virtual stick slowly recentres so you can let go.
@@ -293,8 +337,19 @@ export class Input {
 
     // Throttle: held keys ramp it, gamepad triggers set it.
     if (padThrottle !== null) this.throttleTarget = padThrottle;
-    if (this.held('throttleUp')) this.throttleTarget = clamp(this.throttleTarget + dt * 0.62, 0, 1);
-    if (this.held('throttleDown')) this.throttleTarget = clamp(this.throttleTarget - dt * 0.62, 0, 1);
+    // The arrow keys belong to the throttle until free look claims them, so
+    // check the modifier keys separately from the shared arrows.
+    const throttleKey = (action, arrows) => {
+      const codes = this.bindings[action] || [];
+      for (const c of codes) {
+        if (!arrows && (c === 'ArrowUp' || c === 'ArrowDown')) continue;
+        if (this.keys.has(c)) return true;
+      }
+      return false;
+    };
+    const arrowsFree = !this.freeLook;
+    if (throttleKey('throttleUp', arrowsFree)) this.throttleTarget = clamp(this.throttleTarget + dt * 0.62, 0, 1);
+    if (throttleKey('throttleDown', arrowsFree)) this.throttleTarget = clamp(this.throttleTarget - dt * 0.62, 0, 1);
     this.out.throttle = lerp(this.out.throttle, this.throttleTarget, clamp(dt * 6, 0, 1));
 
     const braking = this.held('brakes') || (this.padEdges && this.padEdges.brakes);

@@ -55,7 +55,7 @@ const FPM = UNITS.FPM;
 
 /** Bumped whenever the game changes. Printed on boot so you can tell at a
  *  glance whether a browser is running a stale cached copy. */
-export const BUILD = 'v11 — keyboard focus fix, rails on the ground, Esc restores UI';
+export const BUILD = 'v13 — free head-look, paper UI removed';
 
 const loadEl = document.getElementById('loading');
 const loadBar = document.getElementById('load-bar');
@@ -224,6 +224,8 @@ class Game {
     this.menus.syncProgress(this.progress);
     this.menus.syncSound(this.settings.muted);
     this.menus.syncMap(this.settings.map || 'kestrel');
+    this.input.freeLook = !!this.settings.freeLook;
+    this.menus.syncFreeLook(this.input.freeLook);
 
     window.addEventListener('resize', () => this.onResize());
     window.addEventListener('pointerdown', () => this.unlockAudio(), { once: false });
@@ -686,6 +688,12 @@ class Game {
   }
 
   pauseAction(a) {
+    if (a === 'freelook') {
+      const on = !this.settings.freeLook;
+      this.applySetting('freeLook', on);
+      this.menus.syncFreeLook(on);
+      return;
+    }
     if (a === 'resume') this.resume();
     else if (a === 'restart') {
       this.menus.hide();
@@ -832,6 +840,15 @@ class Game {
     } else if (path === 'guidance') {
       this.navGuide.setEnabled(value);
       this.hud.setGuideActive(value);
+    } else if (path === 'freeLook') {
+      this.input.freeLook = value;
+      this.hud.notify(
+        value
+          ? 'Free look on — move the mouse or use the arrow keys to look around'
+          : 'Free look off — the arrow keys are the throttle again',
+        'info',
+        3.4
+      );
     } else if (path === 'realisticFuel') {
       this.aircraft.realisticFuel = value;
       this.hud.notify(
@@ -965,6 +982,10 @@ class Game {
     // while editing the game, because reloads keep serving the old files.
     const params = new URLSearchParams(location.search);
     const devMode = params.has('dev');
+    // Inside the native macOS app the game is served over a private URL
+    // scheme, where service workers neither work nor are needed — the whole
+    // thing is already on disk. Registering would only throw.
+    if (!/^https?:$/.test(location.protocol)) return;
     if ('serviceWorker' in navigator && devMode) {
       navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister()));
       if (window.caches) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k)));
