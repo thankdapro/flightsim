@@ -7,7 +7,7 @@
  */
 
 import * as THREE from '../vendor/three.module.js';
-import { heightAt, scatter, MAP, ISLANDS } from './terrain.js';
+import { heightAt, scatter, MAP, ISLANDS, addObstacleAt } from './terrain.js';
 import { treeTexture, buildingTexture, roofTexture, foamTexture } from '../render/textures.js';
 
 export const DELIVERY_PAD = new THREE.Vector3(6200, 0, -5200);
@@ -41,30 +41,79 @@ function treeGeometry() {
   return merged;
 }
 
-function addTrees(group, spots, height = 9) {
-  const tex = treeTexture();
-  const mat = new THREE.MeshStandardMaterial({
-    map: tex,
-    transparent: false,
-    alphaTest: 0.42,
-    roughness: 0.85,
-    side: THREE.DoubleSide,
-  });
-  const inst = new THREE.InstancedMesh(treeGeometry(), mat, spots.length);
-  inst.castShadow = true;
-  inst.receiveShadow = false;
+/**
+ * Plant a grove.
+ *
+ * `mix` is the weighting of the four species, so a coastline can be mostly
+ * palm while high ground is mostly conifer. Each species gets its own
+ * instanced mesh — one draw call each, four instead of one, which is nothing
+ * next to what it buys.
+ *
+ * Trees are solid. They were scenery you flew through, which is a strange
+ * thing in a game where you can hit a hangar: a palm is a heavy object and a
+ * light aeroplane loses an argument with one. Only the ones big enough to
+ * matter get a hitbox — a knee-high bush should not end a flight — and the box
+ * is deliberately narrower than the canopy, because clipping a frond is not
+ * the same as hitting the trunk.
+ */
+function addTrees(group, spots, height = 9, mix = [0.7, 0.15, 0.05, 0.1], solid = true) {
+  const total = mix.reduce((a, b) => a + b, 0) || 1;
+  const buckets = [[], [], [], []];
+  for (const s of spots) {
+    // Deterministic from the spot itself, so a given tree is always the same
+    // species however many times the world is rebuilt.
+    let r = ((Math.sin(s.x * 12.9898 + s.z * 78.233) * 43758.5453) % 1 + 1) % 1;
+    r *= total;
+    let k = 0;
+    for (let i = 0; i < mix.length; i++) {
+      if (r < mix[i]) { k = i; break; }
+      r -= mix[i];
+      k = i;
+    }
+    buckets[k].push(s);
+  }
+
+  const meshes = [];
   const d = new THREE.Object3D();
-  spots.forEach((s, i) => {
-    d.position.set(s.x, s.y - 0.4, s.z);
-    d.rotation.set(0, s.rot, 0);
-    const h = height * s.scale;
-    d.scale.set(h * 0.8, h, h * 0.8);
-    d.updateMatrix();
-    inst.setMatrixAt(i, d.matrix);
+  buckets.forEach((list, kind) => {
+    if (!list.length) return;
+    const mat = new THREE.MeshStandardMaterial({
+      map: treeTexture(kind),
+      transparent: false,
+      alphaTest: 0.42,
+      roughness: 0.85,
+      side: THREE.DoubleSide,
+    });
+    const inst = new THREE.InstancedMesh(treeGeometry(), mat, list.length);
+    inst.castShadow = true;
+    inst.receiveShadow = false;
+    // The scrub is low and wide; the conifer is tall and narrow.
+    const shape = [
+      { w: 0.8, h: 1.0 },
+      { w: 0.95, h: 0.9 },
+      { w: 0.72, h: 1.15 },
+      { w: 1.05, h: 0.42 },
+    ][kind];
+    list.forEach((s, i) => {
+      d.position.set(s.x, s.y - 0.4, s.z);
+      d.rotation.set(0, s.rot, 0);
+      const h = height * s.scale * shape.h;
+      d.scale.set(h * shape.w, h, h * shape.w);
+      d.updateMatrix();
+      inst.setMatrixAt(i, d.matrix);
+      // Anything over four metres is worth hitting. The trunk box is a
+      // quarter of the canopy width and stops short of the very top, so you
+      // can brush the leaves without being killed by them.
+      if (solid && kind !== 3 && h > 4) {
+        const trunkW = Math.max(1.2, h * shape.w * 0.22);
+        addObstacleAt(s.x, s.z, trunkW, trunkW, s.y - 0.4, h * 0.86, 'You flew into a tree');
+      }
+    });
+    inst.instanceMatrix.needsUpdate = true;
+    group.add(inst);
+    meshes.push(inst);
   });
-  inst.instanceMatrix.needsUpdate = true;
-  group.add(inst);
-  return inst;
+  return meshes;
 }
 
 function addTown(group, spots) {
@@ -97,6 +146,9 @@ function addTown(group, spots) {
       d.scale.set(w + 1.2, 0.9, dep + 1.2);
       d.updateMatrix();
       roofs.setMatrixAt(i, d.matrix);
+      // The town is solid too. Flying through a block of flats was every bit
+      // as odd as flying through the trees.
+      addObstacleAt(s.x, s.z, w, dep, s.y - 0.5, h + 1.3, 'You flew into a building');
     });
     inst.instanceMatrix.needsUpdate = true;
     roofs.instanceMatrix.needsUpdate = true;
@@ -266,7 +318,8 @@ export class Scenery {
       maxH: Math.max(40, cfg.hillBand[0] + 30),
       maxSlope: 0.45,
     });
-    addTrees(this.group, coast, cfg.coastTreeHeight);
+    // Coast: palms, with a little scrub between them.
+    addTrees(this.group, coast, cfg.coastTreeHeight, [0.72, 0.1, 0.02, 0.16]);
 
     // Denser stands up on the higher ground.
     const upland = scatter({
@@ -279,7 +332,8 @@ export class Scenery {
       maxH: cfg.hillBand[1],
       maxSlope: 0.7,
     });
-    addTrees(this.group, upland, cfg.hillTreeHeight);
+    // High ground: conifer and broadleaf, which is what actually grows up there.
+    addTrees(this.group, upland, cfg.hillTreeHeight, [0.06, 0.36, 0.46, 0.12]);
 
     // The town, in whatever flat land this map has near the field.
     const town = scatter({
@@ -306,7 +360,8 @@ export class Scenery {
       maxSlope: 0.5,
       avoidAirport: false,
     });
-    addTrees(this.group, padTrees, cfg.coastTreeHeight);
+    // Round the delivery pad, and NOT solid — landing there is the mission.
+    addTrees(this.group, padTrees, cfg.coastTreeHeight, [0.6, 0.18, 0.02, 0.2], false);
 
     this.lighthouseLamp = buildLighthouse(this.group, cfg.lighthouse[0], cfg.lighthouse[1]);
     buildDeliveryPad(this.group);

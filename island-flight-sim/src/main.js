@@ -11,16 +11,20 @@ import * as THREE from './vendor/three.module.js';
 import { warmTextures } from './render/textures.js';
 import { Weather } from './world/weather.js';
 import { SkyDome } from './world/sky.js';
-import { createTerrain, heightAt, AIRPORT, applyMap } from './world/terrain.js';
+import { createTerrain, heightAt, AIRPORT, applyMap, MAP, clearObstacles } from './world/terrain.js';
 import { Ocean } from './world/water.js';
 import { Airport, RUNWAY } from './world/airport.js';
 import { Scenery, DELIVERY_PAD } from './world/scenery.js';
+import { MapFeatures } from './world/features.js';
+import { Apron } from './world/apron.js';
 import { CloudField } from './world/clouds.js';
 import { Rain } from './world/precip.js';
 
-import { Aircraft, EVENTS, UNITS, SPEC } from './aircraft/physics.js';
+import { Aircraft, EVENTS, UNITS, SPEC, applyAircraft } from './aircraft/physics.js';
+import { getAircraft } from './aircraft/types.js';
 import { createAircraftModel } from './aircraft/model.js';
 import { createCockpit } from './aircraft/cockpit.js';
+import { TouchControls, isTouchDevice } from './ui/touch.js';
 
 import { Input, ACTIONS, keyLabel } from './flight/input.js';
 import { CameraRig, VIEW_LABELS } from './flight/camera.js';
@@ -36,6 +40,10 @@ import { TUTORIAL } from './game/tutorial.js';
 import { AtcDirector } from './game/atc-director.js';
 import { CargoCrate } from './game/markers.js';
 import { NavGuide } from './game/navguide.js';
+import { TaxiRun } from './game/taxi.js';
+import { Wreck } from './game/wreck.js';
+import { Tornado } from './world/tornado.js';
+import { NATURAL_EVENTS, findEvent, poolForMap, severityForMap } from './game/disasters.js';
 import { Autopilot } from './flight/autopilot.js';
 
 import {
@@ -55,7 +63,7 @@ const FPM = UNITS.FPM;
 
 /** Bumped whenever the game changes. Printed on boot so you can tell at a
  *  glance whether a browser is running a stale cached copy. */
-export const BUILD = 'v13 — free head-look, paper UI removed';
+export const BUILD = 'v23 — two runways, tornado, sealed cockpit, fuel load';
 
 const loadEl = document.getElementById('loading');
 const loadBar = document.getElementById('load-bar');
@@ -165,7 +173,7 @@ class Game {
     this.aircraft.realisticFuel = !!this.settings.realisticFuel;
     this.model = createAircraftModel();
     this.scene.add(this.model);
-    this.cockpit = createCockpit({ highContrast: this.settings.highContrast });
+    this.cockpit = createCockpit({ highContrast: this.settings.highContrast, type: this.aircraftType });
     this.model.add(this.cockpit);
     this.cockpit.visible = false;
 
@@ -174,6 +182,10 @@ class Game {
 
     this.navGuide = new NavGuide(this.scene);
     this.autopilot = new Autopilot();
+    this.taxi = new TaxiRun(this);
+    this.wreck = new Wreck(this.scene);
+    this.tornado = new Tornado(this.scene);
+    this.weather.vortex = this.tornado;
     this.navGuide.setEnabled(this.settings.guidance !== false);
 
     setLoad(0.9, 'Warming up the radio…');
@@ -183,6 +195,14 @@ class Game {
 
     this.input = new Input(canvas);
     this.hud = new Hud(document.getElementById('ui'), { onAction: (a) => this.hudAction(a) });
+    // On-screen controls, only where there is no keyboard to speak of.
+    if (isTouchDevice()) {
+      this.touch = new TouchControls(this.hud.wrap, {
+        input: this.input,
+        onAction: (a) => this.hudAction(a),
+      });
+      this.hud.wrap.classList.add('is-touch');
+    }
     this.hud.setSubtitlesEnabled(this.settings.subtitles);
     this.hud.setHighContrast(this.settings.highContrast);
     this.hud.setLargeText(this.settings.largeText);
@@ -204,6 +224,30 @@ class Game {
       startFree: (opts) => this.startMode('free', opts),
       onSetting: (path, value) => this.applySetting(path, value),
       onPauseAction: (a) => this.pauseAction(a),
+      onTrigger: (kind) => this.toggleFailure(kind),
+      onNatural: (id) => this.triggerNatural(id),
+      onAutopilotAlt: (ft) => {
+        // Tell it to climb or descend. Used by "hold" and by the level change —
+        // returning to the field and lining up both set their own heights.
+        this.autopilot.setSelectedAlt(ft);
+        if (this.autopilot.engaged) {
+          this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget));
+          this.hud.notify(`Autopilot to ${ft.toLocaleString()} ft`, 'info', 2.4);
+        }
+      },
+      onAutopilotMode: (id) => {
+        this.autopilot.setMode(id);
+        // Choosing a job for it is also asking it to do the job.
+        if (!this.autopilot.engaged) this.toggleAutopilot(true);
+        else this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget));
+        const m = {
+          hold: 'holding heading and height',
+          level: `on its way to ${Math.round(this.autopilot.selectedAltFt).toLocaleString()} ft`,
+          field: 'returning to the airfield',
+          approach: 'lining up with runway 09',
+        }[id];
+        this.hud.notify(`Autopilot ${m}`, 'info', 3.5);
+      },
       getBindings: () => this.input.bindings,
       captureKey: (action, done) => this.input.capture(action, done),
       resetKeys: () => this.input.resetBindings(),
@@ -282,6 +326,23 @@ class Game {
   }
 
   /**
+   * Run something after the next paint, whether or not the browser feels like
+   * giving us a frame. Same race as `frame()`: requestAnimationFrame stops in
+   * a background tab and while a native <select> dropdown is open, and work
+   * that never runs is indistinguishable from a crash.
+   */
+  afterPaint(fn) {
+    let done = false;
+    const go = () => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+    requestAnimationFrame(go);
+    setTimeout(go, 120);
+  }
+
+  /**
    * Tear the old world down properly. Removing a group from the scene only
    * unhooks it — the geometry, materials and textures stay resident on the
    * GPU. That is fine once, but the world is rebuilt every time the graphics
@@ -333,6 +394,10 @@ class Game {
     };
 
     console.debug('[world] build start', quality);
+    // Solid structures are registered as each piece builds itself, so the list
+    // has to start empty or a rebuild would leave ghost buildings behind to
+    // crash into.
+    clearObstacles();
     this.sky = t('sky', () =>
       new SkyDome(this.scene, {
         shadows: quality !== 'low',
@@ -342,7 +407,12 @@ class Game {
     this.terrain = t('terrain', () => createTerrain(this.scene, quality));
     this.ocean = t('ocean', () => new Ocean(this.scene));
     this.airport = t('airport', () => new Airport(this.scene));
+    // The terminal, the air bridges, the parked aeroplanes and the vehicles.
+    this.apron = t('apron', () => new Apron(this.scene, quality));
     this.scenery = t('scenery', () => new Scenery(this.scene, quality));
+    // Whatever makes this particular map the place it says it is: lava, reef,
+    // farmland, waterfalls, the aurora.
+    this.features = t('features', () => new MapFeatures(this.scene, quality));
     this.clouds = t('clouds', () => new CloudField(this.scene, quality));
     this.rain = t('rain', () => new Rain(this.scene, quality));
     // Image-based lighting from the sky. Do this after the world exists so the
@@ -358,7 +428,9 @@ class Game {
       this.terrain,
       this.ocean.group,
       this.airport.group,
+      this.apron.group,
       this.scenery.group,
+      this.features.group,
       this.clouds.group,
       this.rain.mesh,
     ];
@@ -412,6 +484,11 @@ class Game {
         this.audio.engine.playStop();
       }
       this.rig.kick(1.4);
+      // Something to look at. A crash used to leave the aeroplane sitting
+      // there in one piece, which read as the game having frozen rather than
+      // as having gone badly wrong.
+      const inWater = heightAt(ac.pos.x, ac.pos.z) < 0 && ac.pos.y < 4;
+      this.wreck.start(ac.pos, ac.vel, inWater);
       this.hud.showBanner('Crashed', c.reason, 'bad', 6);
       setTimeout(() => {
         if (this.state === 'flying') this.showCrashDebrief(c.reason);
@@ -543,6 +620,9 @@ class Game {
     this.hud.clearTransient();
     this.autopilot.setEngaged(false, this.aircraft);
     this.hud.setAutopilot(false);
+    this.taxi.stop();
+    this.wreck.clear();
+    this.tornado.clear();
     this.hud.setGuideActive(this.navGuide.enabled);
     this.atc.reset();
     this.removeCrate();
@@ -554,6 +634,56 @@ class Game {
     if (mode === 'tutorial') def = TUTORIAL;
     else if (mode === 'mission') def = findMission(opts.id) || FREE_FLIGHT;
 
+    // Failures armed on the Free Flight screen. They wait until you are
+    // actually flying and then the clock starts, so you get to be somewhere
+    // interesting before anything happens.
+    this.armed = mode === 'free' && opts.failures ? { ...opts.failures } : {};
+    this.armedEvents = mode === 'free' && opts.events ? { ...opts.events } : {};
+    this._groundT = 0;
+    /** Natural events currently running, with the seconds left on each. */
+    this.activeEvents = {};
+    this.lightningStorm = null;
+    this.instrumentBlackout = 0;
+    this._armedT = 0;
+    this._hasFlown = false;
+    // Randomised disasters: things break on their own, and worse weather makes
+    // that more likely — which is true of real aeroplanes as well.
+    this.randomDisasters = mode === 'free' && !!opts.randomDisasters;
+    // The Enhanced Fujita rating the player asked for, or null for "its own".
+    this.tornadoEF = mode === 'free' && opts.tornadoEF != null ? opts.tornadoEF : null;
+    this._disasterT = 0;
+    // First one is a long way off: the point is to be caught out once,
+    // somewhere awkward, not to be pecked to death on the climb-out.
+    this._nextDisaster = 180 + Math.random() * 240;
+
+    // Which aeroplane. Only Free Flight offers the choice — the tutorial and
+    // the missions are written around the trainer's numbers.
+    this.setAircraft(mode === 'free' ? opts.aircraft || 'skylark' : 'skylark');
+    // setAircraft returns early when the type has not changed, so the name is
+    // set here as well — otherwise flying the same aeroplane twice in a row
+    // leaves the panel blank the second time.
+    this.hud.setAircraftName(this.aircraftType.name);
+
+    /*
+     * A mission may demand a particular place and a particular aeroplane.
+     *
+     * Some of them only make sense somewhere specific — you cannot fly a
+     * volcano run without a volcano — and some are about what a given airframe
+     * is good at. Both are set before the spawn so the world underneath the
+     * aeroplane is the right one by the time it is put down on it.
+     */
+    if (def.map && this.settings.map !== def.map) {
+      applyMap(def.map);
+      this.settings.map = def.map;
+      saveSettings(this.settings);
+      this.menus.syncMap(def.map);
+      this.buildWorld(this.settings.quality);
+    }
+    if (def.aircraft && this.aircraftType.id !== def.aircraft) {
+      this.setAircraft(def.aircraft);
+      this.hud.setAircraftName(this.aircraftType.name);
+    }
+
     // Weather.
     if (mode === 'free') {
       this.weather.load(opts);
@@ -564,6 +694,9 @@ class Game {
     }
 
     // Spawn.
+    // Starting on the stand is opt-in, so the tutorial, the missions and every
+    // existing test still begin lined up on the runway.
+    const wantsTaxi = mode === 'free' && (opts.taxi ?? this.settings.startAtGate);
     const spawn = def.spawn || RUNWAY_START;
     const airborne = mode === 'free' ? !!opts.airborne : spawn.altAGL != null;
     if (mode === 'free' && airborne) {
@@ -573,6 +706,7 @@ class Game {
         speed: 60,
         altAGL: 610,
         engineOn: true,
+        fuel: opts.fuel != null ? Math.max(0.05, Math.min(1, opts.fuel)) : 1,
       });
       this.aircraft.controls.throttle = 0.7;
       this.input.throttleTarget = 0.7;
@@ -583,6 +717,9 @@ class Game {
         speed: spawn.speed || 0,
         altAGL: spawn.altAGL ?? null,
         engineOn: spawn.engineOn !== false,
+        // How much fuel you asked for. Free Flight only; the tutorial and the
+        // missions always start with full tanks.
+        fuel: mode === 'free' && opts.fuel != null ? Math.max(0.05, Math.min(1, opts.fuel)) : 1,
       });
       if (spawn.speed) {
         this.aircraft.controls.throttle = 0.65;
@@ -615,6 +752,7 @@ class Game {
     }
 
     this.state = 'flying';
+    if (wantsTaxi) this.taxi.start();
     this.clock.getDelta();
   }
 
@@ -663,6 +801,14 @@ class Game {
       this.hud.setHidden(false);
       this.hud.notify('Interface restored — press U to hide it again', 'info', 3);
     }
+    this.menus.syncTriggers(this.mode === 'free', this.aircraft.failures);
+    this.menus.syncNatural(this.activeEvents);
+    this.menus.syncAutopilot(this.autopilot.engaged, this.autopilot.mode);
+    this.menus.syncRealisticCockpit(!!this.settings.realisticCockpit);
+    // From the setting itself, so the label can never drift out of step with
+    // what the input layer is actually doing.
+    this.input.freeLook = !!this.settings.freeLook;
+    this.menus.syncFreeLook(this.input.freeLook);
     const r = this.aircraft.readouts();
     this.menus.setPauseInfo(`
       <div class="pause-grid">
@@ -692,6 +838,12 @@ class Game {
       const on = !this.settings.freeLook;
       this.applySetting('freeLook', on);
       this.menus.syncFreeLook(on);
+      return;
+    }
+    if (a === 'realistic') {
+      const on = !this.settings.realisticCockpit;
+      this.applySetting('realisticCockpit', on);
+      this.menus.syncRealisticCockpit(on);
       return;
     }
     if (a === 'resume') this.resume();
@@ -729,6 +881,23 @@ class Game {
       case 'autopilot':
         this.toggleAutopilot();
         break;
+      case 'skipTaxi':
+        this.taxi.skip();
+        break;
+      case 'gear':
+        if (!this.aircraft.toggleGear()) {
+          this.hud.notify('Too fast for the landing gear — slow down first', 'warn', 3);
+        }
+        break;
+      case 'flaps': {
+        // One button, so it walks down through the settings and wraps around.
+        const ac = this.aircraft;
+        const next = ac.flapStep() >= 3 ? 0 : ac.flapStep() + 1;
+        const set = ac.setFlaps(next);
+        this.audio.available && this.audio.ambience.playFlaps();
+        this.hud.notify(`Flaps ${set * 10}°`, 'info', 2);
+        break;
+      }
       case 'hideUi':
         // Cinematic view. The button disappears along with everything else, so
         // the keyboard is the only way back — say so before it goes.
@@ -737,6 +906,15 @@ class Game {
       case 'help':
         this.hud.toggleControls(this.input.bindings, keyLabel, ACTIONS);
         break;
+      case 'keys': {
+        const on = this.hud.toggleKeyMonitor();
+        this.hud.notify(
+          on ? 'Key monitor on — it shows what you are pressing' : 'Key monitor off',
+          'info',
+          2.4
+        );
+        break;
+      }
     }
   }
 
@@ -766,6 +944,11 @@ class Game {
    * off, exactly like the real thing — you should never have to fight it.
    */
   toggleAutopilot(force) {
+    // Nothing to fly on while the instruments are out.
+    if (this.instrumentBlackout > 0 && force !== false && !this.autopilot.engaged) {
+      this.hud.notify('Autopilot unavailable — instruments are out', 'warn', 3);
+      return false;
+    }
     const want = force === undefined ? !this.autopilot.engaged : !!force;
     if (want && this.aircraft.onGround) {
       this.hud.notify('Autopilot needs you to be flying first', 'warn', 2.6);
@@ -784,6 +967,7 @@ class Game {
     }
     this.audio.available && this.audio.alerts.uiClick();
     return on;
+      this.menus.syncAutopilot(this.autopilot.engaged, this.autopilot.mode);
   }
 
   /* ------------------------------------------------------------------ */
@@ -802,6 +986,16 @@ class Game {
     } else if (path === 'muted') {
       this.audio.setMuted(value);
       this.hud.setMuted(value);
+    } else if (path.startsWith('soundOn.')) {
+      // A source switched on or off. The volume it had is remembered, so
+      // switching it back on returns it to where you left it.
+      const bus = path.slice('soundOn.'.length);
+      this.audio.mixer.setBusEnabled(bus, !!value);
+      if (bus === 'music') {
+        this.audio.setMusicEnabled(!!value && this.settings.music !== false);
+        if (!value) this.audio.music.stop();
+        else if (this.state === 'menu') this.audio.music.start();
+      }
     } else if (path === 'music') {
       this.audio.setMusicEnabled(value);
       if (value && this.state === 'menu') this.audio.music.start();
@@ -849,6 +1043,22 @@ class Game {
         'info',
         3.4
       );
+    } else if (path === 'realisticCockpit') {
+      if (this.rig) this.rig.realisticCockpit = !!value;
+      /*
+       * Switching it on puts you in the cockpit.
+       *
+       * It set a flag on the camera rig and nothing else, so from the chase
+       * view — which is where everyone is — turning on "realistic cockpit"
+       * appeared to do absolutely nothing, and you had to know to press C
+       * afterwards. A view option that does not change the view is broken,
+       * whatever the flag says.
+       */
+      if (value && this.rig && this.rig.mode !== 'cockpit') {
+        this.rig.setMode('cockpit');
+        this.hud.notify('Cockpit view — press C to look from outside again', 'info', 3);
+      }
+      if (this.hud) this.hud.setMinimal(!!value && this.rig && this.rig.mode === 'cockpit');
     } else if (path === 'realisticFuel') {
       this.aircraft.realisticFuel = value;
       this.hud.notify(
@@ -883,8 +1093,13 @@ class Game {
   rebuildQuality(quality) {
     if (quality === this.qualityBuilt) return;
     this.hud.notify('Rebuilding the island…', 'info', 2.5);
-    // Give the message a frame to paint before the (blocking) rebuild.
-    requestAnimationFrame(() => {
+    // Give the message a frame to paint before the (blocking) rebuild — but
+    // race it against a timer. This is triggered straight from a <select>, and
+    // while a native dropdown is open the browser stops servicing
+    // requestAnimationFrame, so the callback never ran and the world was never
+    // rebuilt. From the outside that looks exactly like the game freezing the
+    // moment you choose something. `frame()` already does this for loading.
+    this.afterPaint(() => {
       this.buildWorld(quality);
       this.renderer.shadowMap.enabled = quality !== 'low';
       this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality === 'high' ? 2 : 1.25));
@@ -897,6 +1112,244 @@ class Game {
    * every mission and the landing scoring all carry over untouched — only the
    * land around the field changes.
    */
+  /**
+   * Choose which aeroplane to fly.
+   *
+   * A different aeroplane is a different flight model *and* a different model
+   * on screen, so both are replaced. The old one is disposed rather than just
+   * detached — leaked geometry is what used to make the sea flicker after a
+   * long session, and there is no reason to relearn that lesson here.
+   */
+  setAircraft(id) {
+    const want = getAircraft(id);
+    if (this.aircraftType && this.aircraftType.id === want.id) return this.aircraftType;
+    this.aircraftType = applyAircraft(want.id);
+    const S = this.aircraftType.shape;
+
+    if (this.model) {
+      this.scene.remove(this.model);
+      const seen = new Set();
+      this.model.traverse((o) => {
+        if (o.geometry && !seen.has(o.geometry)) {
+          seen.add(o.geometry);
+          o.geometry.dispose();
+        }
+        const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+        for (const m of mats) {
+          if (seen.has(m)) continue;
+          seen.add(m);
+          m.dispose();
+        }
+      });
+    }
+
+    this.model = createAircraftModel({ type: this.aircraftType });
+    this.scene.add(this.model);
+    this.cockpit = createCockpit({ highContrast: this.settings.highContrast, type: this.aircraftType });
+    // The airframe is scaled to size; the cockpit is not. There is one
+    // instrument panel and the pilot is the same size in all five aeroplanes,
+    // so it is counter-scaled back to life size.
+    this.cockpit.scale.setScalar(1 / S.scale);
+    // ...and then moved so its own eye point lands where *this* aeroplane's
+    // pilot actually sits. Without this the panel stays bolted to the centre
+    // of gravity: fine in the trainer, where the two coincide, and three
+    // metres behind your head in the airliner.
+    const TRAINER_EYE = [-0.24, 0.46, 0.06];
+    this.cockpit.position.set(
+      S.eye[0] - TRAINER_EYE[0] / S.scale,
+      S.eye[1] - TRAINER_EYE[1] / S.scale,
+      S.eye[2] - TRAINER_EYE[2] / S.scale
+    );
+    this.model.add(this.cockpit);
+    this.cockpit.visible = false;
+
+    if (this.rig) {
+      this.rig.eye.set(S.eye[0] * S.scale, S.eye[1] * S.scale, S.eye[2] * S.scale);
+      this.rig.realisticCockpit = !!this.settings.realisticCockpit;
+    }
+    if (this.hud) this.hud.setAircraftName(this.aircraftType.name);
+    if (this.audio) this.audio.setEngineKind(S.power.kind);
+
+    /*
+     * Re-seat the aeroplane if it is sitting on the ground.
+     *
+     * Swapping to a taller aeroplane left it at the previous one's spawn
+     * height with the new one's undercarriage, which drove the nose straight
+     * into the tarmac — an instant "The nose struck the ground" before you had
+     * touched anything. Nothing a player can reach today does this, because
+     * the fleet is chosen before the flight starts, but it is a loaded gun
+     * lying around for the next mission that changes aeroplane mid-flight.
+     */
+    if (this.aircraft && this.aircraft.onGround && !this.aircraft.crashed) {
+      this.aircraft.reset({
+        pos: this.aircraft.pos.clone(),
+        headingDeg: this.aircraft.readouts().heading,
+        speed: this.aircraft.groundSpeed,
+        engineOn: this.aircraft.engineOn,
+      });
+    }
+    return this.aircraftType;
+  }
+
+  /**
+   * Fire any failure that was armed before the flight and whose time has come.
+   * The clock only runs once you are airborne — "after five minutes" should
+   * not tick away while you are still on the stand.
+   */
+  updateArmedFailures(dt) {
+    const ac = this.aircraft;
+    // Two clocks. The flight clock only runs once you are actually airborne,
+    // because "after five minutes of flight" should not tick away while you
+    // are still taxiing. But anything armed for *straight away* used to wait
+    // on that same clock, so it sat there doing nothing until you took off —
+    // which reads as broken rather than as waiting. Zero now means zero.
+    this._groundT = (this._groundT || 0) + dt;
+    if (!this._hasFlown && ac.agl > 8) this._hasFlown = true;
+    if (this._hasFlown) this._armedT += dt;
+    const due = (a) => (a.afterMin > 0 ? this._hasFlown && this._armedT >= a.afterMin * 60 : this._groundT >= 2.5);
+
+    for (const id of Object.keys(this.armedEvents || {})) {
+      const a = this.armedEvents[id];
+      if (!due(a)) continue;
+      delete this.armedEvents[id];
+      this.triggerNatural(id);
+    }
+    const armed = this.armed;
+    if (!armed) return;
+    for (const kind of Object.keys(armed)) {
+      const a = armed[kind];
+      if (!due(a)) continue;
+      delete armed[kind];
+      if (kind === 'fuelLeak' && a.amountMin) ac.fuelLeakSeconds = a.amountMin * 60;
+      if (!ac.failures[kind]) this.toggleFailure(kind);
+    }
+  }
+
+  /**
+   * Roll the dice. Only when you have asked for it, only while airborne, and
+   * never twice for the same thing.
+   */
+  /**
+   * The mountain's own business, which runs whether or not you asked for
+   * random disasters — an active volcano does not wait to be switched on.
+   *
+   * Two rules: it erupts every few minutes on a map that has one, and flying
+   * near the crater always puts you in ash. The second is not a dice roll. If
+   * you fly through the column over a live vent, your engine eats it; the game
+   * should not sometimes let you get away with that.
+   */
+  updateVolcano(dt) {
+    if (!MAP.features || !MAP.features.volcano || !this._hasFlown) return;
+    const ac = this.aircraft;
+    if (ac.crashed || this.state !== 'flying') return;
+
+    // The cone itself — the first volcano in the list is the big one.
+    const isl = (MAP.islands || []).find((i) => i.name === MAP.features.volcano[0].island) || MAP.islands[0];
+    if (!isl) return;
+    const dist = Math.hypot(ac.pos.x - isl.cx, ac.pos.z - isl.cz);
+
+    // Near the core: always ash, every time, for as long as you stay there.
+    const inPlume = dist < isl.radius * 0.55 && ac.pos.y < isl.peak + 1400;
+    if (inPlume) {
+      this._ashDwell = (this._ashDwell || 0) + dt;
+      if (this._ashDwell > 2.5 && !this.activeEvents?.ashCloud) {
+        this.triggerNatural('ashCloud');
+        this.hud.notify('You are in the ash column — the engine is eating it', 'warn', 5);
+      }
+    } else {
+      this._ashDwell = 0;
+    }
+
+    // And every so often, it goes up.
+    this._eruptT = (this._eruptT || 0) + dt;
+    if (this._eruptT > (this._nextErupt || 300)) {
+      this._eruptT = 0;
+      this._nextErupt = 260 + Math.random() * 320;
+      this.triggerNatural('eruption');
+    }
+
+    // While it is erupting the air over the cone is a chimney: a huge
+    // updraught in the middle, and the ash reaches much further out.
+    if (this.erupting > 0) {
+      this.erupting -= dt;
+      const reach = isl.radius * 1.25;
+      if (dist < reach && ac.pos.y < isl.peak + 2600) {
+        const f = 1 - dist / reach;
+        ac.vel.y += 12 * f * dt;
+        this.rig.kick(f * 0.5 * dt * 6);
+        if (dist < isl.radius * 0.75) this._ashDwell = (this._ashDwell || 0) + dt * 2;
+      }
+    }
+  }
+
+  updateRandomDisasters(dt) {
+    if (!this.randomDisasters || !this._hasFlown) return;
+    const ac = this.aircraft;
+    // A storm roughly halves the time between events; clear air stretches it.
+    // Worse weather and a harder map both make things happen more often —
+    // which is what choosing Ember Isle over Harrier Flats ought to mean.
+    const severity =
+      (1 + (this.weather.cond.turb || 0) * 0.9 + (this.weather.cond.cloud || 0) * 0.35) *
+      severityForMap(MAP);
+    this._disasterT += dt * severity;
+    if (this._disasterT < this._nextDisaster) return;
+    this._disasterT = 0;
+    this._nextDisaster = 240 + Math.random() * 300;
+
+    // Roughly half mechanical, half meteorological.
+    const spare = Object.keys(ac.failures).filter((k) => !ac.failures[k]);
+    const events = poolForMap(MAP);
+    const useWeather = events.length && (!spare.length || Math.random() < 0.5);
+    if (useWeather) {
+      this.triggerNatural(events[Math.floor(Math.random() * events.length)].id);
+      return;
+    }
+    if (!spare.length) return;
+    const pick = spare[Math.floor(Math.random() * spare.length)];
+    if (pick === 'fuelLeak') ac.fuelLeakSeconds = 180 + Math.random() * 240;
+    this.toggleFailure(pick);
+  }
+
+  /**
+   * Set a natural disaster going. Unlike the mechanical failures these are not
+   * toggles — weather happens to you and then it is over.
+   */
+  triggerNatural(id) {
+    const ev = findEvent(id);
+    if (!ev) return;
+    ev.apply(this);
+    // Remember it is running so the pause menu can show which ones are live.
+    this.activeEvents = this.activeEvents || {};
+    this.activeEvents[id] = ev.duration || 8;
+    this.menus.syncNatural(this.activeEvents);
+    this.hud.notify(ev.warn, ev.kind === 'bad' ? 'warn' : 'warn', 5);
+    if (this.audio.available) this.audio.alerts.caution && this.audio.alerts.caution();
+  }
+
+  /**
+   * Break something on purpose, or put it back. Free Flight only — an engine
+   * failure in the middle of a lesson is not a lesson.
+   */
+  toggleFailure(kind) {
+    const f = this.aircraft.failures;
+    if (!(kind in f)) return;
+    f[kind] = !f[kind];
+    const on = f[kind];
+    const words = {
+      engine: ['Engine failure — trim for best glide and pick a field', 'Engine restored'],
+      fuelLeak: ['Fuel leak — watch the gauge, you have minutes', 'Leak stopped'],
+      elevator: ['Elevator jammed — fly it on power and trim', 'Elevator freed'],
+      icing: ['Picking up ice — it will stall earlier than usual', 'Ice gone'],
+      gear: ['Undercarriage jammed', 'Undercarriage freed'],
+      brakes: ['Brakes have failed — plan a long roll-out', 'Brakes restored'],
+      roughEngine: ['Engine running rough — part power only, pick somewhere close', 'Engine smooth again'],
+      tyre: ['Burst tyre — it will pull hard to the left on the ground', 'Tyre changed'],
+    };
+    if (on && kind === 'engine') this.aircraft.stopEngine('failure');
+    this.hud.notify(words[kind][on ? 0 : 1], on ? 'warn' : 'good', 4);
+    this.menus.syncTriggers(this.mode === 'free', f);
+  }
+
   setMap(id) {
     const def = applyMap(id);
     this.settings.map = def.id;
@@ -904,8 +1357,9 @@ class Game {
     this.menus.syncMap(def.id);
     if (this.state === 'flying') this.quitToMenu();
     this.hud.notify(`Flying to ${def.name}…`, 'info', 3);
-    // One frame so the message paints before the (blocking) rebuild.
-    requestAnimationFrame(() => {
+    // One frame so the message paints before the (blocking) rebuild, raced
+    // against a timer for the same reason as above.
+    this.afterPaint(() => {
       this.buildWorld(this.settings.quality);
       // Each map has weather that suits it; the player can still change it in
       // Free Flight afterwards.
@@ -938,6 +1392,11 @@ class Game {
     for (const bus in this.settings.volumes) this.audio.setVolume(bus, this.settings.volumes[bus]);
     this.audio.setMuted(this.settings.muted);
     this.audio.setMusicEnabled(this.settings.music);
+    // Restore each source's on/off switch.
+    const on = this.settings.soundOn || {};
+    for (const bus of ['engine', 'environment', 'atc', 'alerts', 'music']) {
+      this.audio.mixer.setBusEnabled(bus, on[bus] !== false);
+    }
     this.audio.radio.backgroundChatter = this.settings.atcChatter;
     this.audio.radio.setMode(this.settings.atcVoice || 'radio');
     if (this.settings.music && this.state === 'menu') this.audio.music.start();
@@ -1149,6 +1608,7 @@ class Game {
     const ac = this.aircraft;
 
     if (this.state === 'flying') {
+      if (this.taxi.active) this.taxi.update(dt);
       const ctrl = this.input.update(dt, { simple: ac.mode === 'simplified' });
       let pitch = ctrl.pitch;
       let roll = ctrl.roll;
@@ -1159,6 +1619,12 @@ class Game {
       // Note the locals: `ctrl` belongs to the input module and is reused every
       // frame, so writing the autopilot's output into it would come straight
       // back next frame looking exactly like the player moving the stick.
+      if (this.autopilot.engaged && this.autopilot.handedBack) {
+        const why = this.autopilot.handedBack;
+        this.autopilot.handedBack = null;
+        this.toggleAutopilot(false);
+        this.hud.notify(why, 'good', 4);
+      }
       if (this.autopilot.engaged) {
         if (this.autopilot.playerTookOver(ctrl) || ac.onGround || ac.crashed) {
           this.toggleAutopilot(false);
@@ -1171,6 +1637,16 @@ class Game {
           throttle = ap.throttle;
           this.input.throttleTarget = ap.throttle;
           this.hud.setAutopilot(true, this.autopilot.status(t));
+          // On an approach it configures the aeroplane, because that is how
+          // you actually come down: a clean airframe at idle will not descend
+          // steeply however hard you push, and no amount of elevator is a
+          // substitute for putting the wheels and the flaps out.
+          if (this.autopilot.mode === 'approach') {
+            const out = -550 - ac.pos.x;
+            if (out < 7000 && !ac.gearDown) ac.toggleGear();
+            const wantFlap = out < 3500 ? 2 : out < 6000 ? 1 : 0;
+            if (ac.flapStep() < wantFlap) ac.setFlaps(wantFlap);
+          }
         }
       }
 
@@ -1215,7 +1691,123 @@ class Game {
     this.ocean.follow(ac.pos);
     this.ocean.update(dt, this.weather);
     this.airport.update(dt, this.weather);
+    this.apron.update(dt, this.weather);
+    this.updateArmedFailures(dt);
+    if (this.instrumentBlackout > 0) {
+      this.instrumentBlackout = Math.max(0, this.instrumentBlackout - dt);
+      this.hud.setBlackout(this.instrumentBlackout > 0);
+      // A dead panel beeps. Once a second, not continuously — a solid tone is
+      // just noise, and the gap is what makes it read as an alarm.
+      // The autopilot flies on the instruments. With the panel dead it has
+      // nothing to fly on, so it drops out — which is the point of a lightning
+      // strike: it hands you an aeroplane in cloud with no help.
+      if (this.autopilot.engaged) {
+        this.toggleAutopilot(false);
+        this.hud.notify('Autopilot dropped out — no instruments', 'warn', 4);
+      }
+      this._blackoutBeep = (this._blackoutBeep || 0) - dt;
+      if (this.instrumentBlackout > 0 && this._blackoutBeep <= 0) {
+        this._blackoutBeep = 1;
+        if (this.audio.available) {
+          this.audio.mixer.tone({ bus: 'alerts', freq: 720, duration: 0.16, gain: 0.3, type: 'square' });
+          this.audio.mixer.tone({ bus: 'alerts', freq: 540, duration: 0.16, gain: 0.22, type: 'square', detune: 8 });
+        }
+      }
+      if (this.instrumentBlackout === 0) this.hud.notify('Instruments back', 'good', 2.5);
+    }
+    this.updateRandomDisasters(dt);
+    this.updateVolcano(dt);
+    this.wreck.update(dt);
+    this.tornado.update(dt);
+
+    // A lightning storm keeps striking for as long as it lasts.
+    if (this.lightningStorm) {
+      const st = this.lightningStorm;
+      st.left -= dt;
+      st.next -= dt;
+      if (st.next <= 0 && st.left > 0) {
+        st.next = 20 + Math.random() * 20;
+        this.weather.lightningFlash = 1;
+        this.instrumentBlackout = Math.max(this.instrumentBlackout, 7 + Math.random() * 7);
+        this.hud.notify('Struck — instruments out', 'warn', 3);
+        if (this.audio.available) this.audio.ambience.playThunder && this.audio.ambience.playThunder();
+      }
+      if (st.left <= 0) {
+        this.lightningStorm = null;
+        this.hud.notify('The storm has passed', 'good', 3);
+      }
+    }
+    // Run the clocks on anything currently happening to you.
+    if (this.activeEvents) {
+      for (const id of Object.keys(this.activeEvents)) {
+        this.activeEvents[id] -= dt;
+        if (this.activeEvents[id] <= 0) delete this.activeEvents[id];
+      }
+    }
+    // Keep a marker on it the whole time it is on the ground.
+    if (this.tornado.active) {
+      const t = this.tornado;
+      const dx = t.pos.x - this.aircraft.pos.x;
+      const dz = t.pos.z - this.aircraft.pos.z;
+      const km = Math.hypot(dx, dz) / 1000;
+      let brg = (Math.atan2(dx, -dz) * 180) / Math.PI;
+      if (brg < 0) brg += 360;
+      // Relative to where the nose is pointing, which is what you can act on.
+      const rel = ((brg - this.aircraft.readouts().heading + 540) % 360) - 180;
+      const clock = Math.round(((rel + 360) % 360) / 30) || 12;
+      this.hud.setHazard(
+        `<b>${t.label || 'TORNADO'} TORNADO</b> ${km.toFixed(1)} km · ` +
+          `bearing ${String(Math.round(brg)).padStart(3, '0')} · ${clock} o'clock`
+      );
+      const near = this.tornado.proximity(this.aircraft.pos);
+      this._tornadoWarn = (this._tornadoWarn || 0) - dt;
+      if (near > 0.62 && this._tornadoWarn <= 0) {
+        this._tornadoWarn = 6;
+        this.hud.notify('You are too close to the tornado — turn away', 'warn', 4);
+        this.rig.kick(near * 0.8);
+      }
+
+      /*
+       * Inside the core it does damage, and the damage scales with the rating.
+       *
+       * The tornado used to be pure wind: unpleasant, but you could fly
+       * straight through the middle of one and come out of the far side with
+       * an intact aeroplane, which made the strongest weather in the game the
+       * least frightening thing in it. Now the core tears at the airframe.
+       */
+      const bite = this.tornado.bite(this.aircraft.pos);
+      if (bite > 0.15 && !this.aircraft.crashed) {
+        const ef = t.ef || 0;
+        // Buffeting you can feel long before anything breaks.
+        // (Not `aircraft.buffet` — the flight model recomputes that from alpha
+        // every step, so writing to it here would be overwritten immediately.)
+        this.rig.kick(bite * (0.6 + ef * 0.22));
+        this._tornadoDamage = (this._tornadoDamage || 0) + dt * bite * (0.35 + ef * 0.25);
+        // Things start letting go, worst first.
+        const f = this.aircraft.failures;
+        if (this._tornadoDamage > 1.1 && f && !f.roughEngine) {
+          f.roughEngine = true;
+          this.hud.notify('Debris through the engine — it is running rough', 'warn', 5);
+        }
+        if (this._tornadoDamage > 2.2 && f && !f.elevator) {
+          f.elevator = true;
+          this.hud.notify('The elevator has been torn — pitch is failing', 'warn', 5);
+        }
+        // Deep in the core of a strong one, the aeroplane simply comes apart.
+        if (this._tornadoDamage > 3.4 && bite > 0.55 && ef >= 2) {
+          this.aircraft.crash('The tornado tore the aeroplane apart');
+        }
+      } else if (this._tornadoDamage) {
+        // Out of it — stop accumulating, but the failures stay broken.
+        this._tornadoDamage = Math.max(0, this._tornadoDamage - dt * 0.2);
+      }
+    } else if (this._hadTornado) {
+      this.hud.setHazard(null);
+    }
+    this._hadTornado = this.tornado.active;
+    if (this.touch) this.touch.update(this.aircraft.readouts());
     this.scenery.update(dt, this.weather);
+    this.features.update(dt, this.weather);
     this.clouds.update(dt, this.weather, ac.pos);
     this.rain.update(dt, this.weather, this.camera.position, ac.vel);
     this.cloudImmersion = this.clouds.cloudImmersion(ac.pos.y, this.weather);
@@ -1226,6 +1818,23 @@ class Game {
     this.model.quaternion.copy(ac.quat);
     this.model.userData.update(dt, ac, this.weather);
     const inCockpit = this.rig.mode === 'cockpit';
+    // Two cockpit views. The default is the clean one — no panel in the way,
+    // wide field of view, instruments on the overlay. "Realistic cockpit" in
+    // the pause menu puts the actual instrument panel in front of you, and
+    // then the overlay copies of those instruments get out of the way,
+    // because you are reading them off the panel instead.
+    const wantPanel = inCockpit && !!this.settings.realisticCockpit;
+    // Only strip the overlay back when you are actually looking at the panel.
+    const wantMinimal = wantPanel;
+    if (wantMinimal !== this._minimalHud) {
+      this._minimalHud = wantMinimal;
+      this.hud.setMinimal(wantMinimal);
+    }
+    // The cockpit is drawn in *both* cockpit views. Hiding it entirely in the
+    // default one was a mistake: switching to the cockpit view and finding no
+    // cockpit there reads as broken, not as clean. What "realistic" changes is
+    // the field of view and whether the overlay repeats the instruments — not
+    // whether the aeroplane has an interior.
     this.cockpit.visible = inCockpit;
     if (inCockpit) this.cockpit.userData.update(dt, ac, this.weather);
     this.audio.setInterior(inCockpit);
@@ -1242,7 +1851,8 @@ class Game {
     // Navigation guidance: the mission's current target, or the runway when
     // there is nothing else to aim at.
     if (this.navGuide) {
-      let guideTarget = this.activeTarget ? this.activeTarget.pos : null;
+      let guideTarget = this.taxi.active ? this.taxi.target() : null;
+      if (!guideTarget) guideTarget = this.activeTarget ? this.activeTarget.pos : null;
       // On the ground with nothing to aim at, point down the runway rather than
       // showing nothing. The rails vanishing the moment you land makes the
       // whole feature look broken, and lined up for take-off is exactly when a

@@ -8,6 +8,7 @@
  */
 
 import { UNITS } from '../aircraft/physics.js';
+import { icon } from './icons.js';
 import { clamp } from '../core/noise.js';
 
 const KTS = UNITS.KTS;
@@ -60,9 +61,14 @@ export class Hud {
       r.appendChild(word);
       return r;
     };
-    left.appendChild(row('Speed', this.speedValue, this.speedWord, 'kt'));
-    left.appendChild(row('Height', this.altValue, this.altWord, 'ft'));
-    left.appendChild(row('Climb', this.vsValue, this.vsWord, 'ft/min'));
+    // Which aeroplane you are in. `setAircraftName` has existed for a while
+    // and wrote into an element that was never built, so choosing a different
+    // aeroplane changed how it flew and nothing on screen ever said so.
+    this.acName = el('div', 'hud-acname', '');
+    left.appendChild(this.acName);
+    left.appendChild(row('Airspeed', this.speedValue, this.speedWord, 'kt'));
+    left.appendChild(row('Altitude', this.altValue, this.altWord, 'ft'));
+    left.appendChild(row('Vertical speed', this.vsValue, this.vsWord, 'ft/min'));
     left.appendChild(row('Heading', this.hdgValue, this.hdgWord, '°'));
     wrap.appendChild(left);
 
@@ -73,7 +79,26 @@ export class Hud {
     this.objectiveText = el('div', 'hud-objective-text', 'Fly wherever you like. Have fun!');
     this.objective.appendChild(this.objectiveTitle);
     this.objective.appendChild(this.objectiveText);
+
+    // Taxi instructions, shown only while taxiing out.
+    this.taxi = el('div', 'hud-taxi');
+    this.taxiText = el('div', 'hud-taxi-text', '');
+    this.taxiHint = el('div', 'hud-taxi-hint', '');
+    this.taxiSkip = el('button', 'hud-taxi-skip', 'Skip to runway \u2192');
+    this.taxiSkip.title = 'Jump straight to the runway, lined up and ready';
+    this.taxiSkip.addEventListener('click', (e) => {
+      e.preventDefault();
+      this.taxiSkip.blur();
+      this.onAction('skipTaxi');
+    });
+    const taxiWords = el('div', 'hud-taxi-words');
+    taxiWords.appendChild(this.taxiText);
+    taxiWords.appendChild(this.taxiHint);
+    this.taxi.appendChild(taxiWords);
+    this.taxi.appendChild(this.taxiSkip);
+    this.taxi.style.display = 'none';
     top.appendChild(this.objective);
+    top.appendChild(this.taxi);
 
     this.waypoint = el('div', 'hud-waypoint');
     this.waypointArrow = el('div', 'hud-arrow', '➤');
@@ -137,29 +162,73 @@ export class Hud {
     bottom.appendChild(chips);
     wrap.appendChild(bottom);
 
-    /* ---- Quick buttons, bottom right ---- */
-    const buttons = el('div', 'hud-buttons');
-    const mkBtn = (label, action, title) => {
-      const b = el('button', 'hud-btn', label);
-      b.title = title || label;
+    /* ---- Quick buttons, bottom right ----
+     *
+     * Nine buttons sat here permanently, which is eight too many with a runway
+     * coming at you. Three stay out — pause, camera, and a tray for the rest —
+     * and the tray closes itself as soon as you use it or look away.
+     */
+    const dock = el('div', 'hud-buttons');
+    const tray = el('div', 'hud-tray');
+    tray.hidden = true;
+
+    const mkBtn = (name, action, title, host, label) => {
+      const b = el('button', host === tray ? 'hud-btn hud-btn-wide' : 'hud-btn');
+      b.innerHTML = icon(name, 20) + (label ? `<span>${label}</span>` : '');
+      b.title = title;
+      b.setAttribute('aria-label', title);
       b.addEventListener('click', (e) => {
         e.preventDefault();
         b.blur();
+        if (host === tray) this.setTrayOpen(false);
         this.onAction(action);
       });
-      buttons.appendChild(b);
+      host.appendChild(b);
       return b;
     };
-    this.btnPause = mkBtn('❚❚', 'pause', 'Pause (Esc)');
-    this.btnCamera = mkBtn('◉', 'camera', 'Change camera (C)');
-    this.btnGuide = mkBtn('⋀', 'guide', 'Guidance lines on/off (N)');
-    this.btnAuto = mkBtn('AP', 'autopilot', 'Autopilot on/off (P)');
-    this.btnCinematic = mkBtn('▣', 'hideUi', 'Hide the interface for a clean shot (U)');
-    this.btnRestart = mkBtn('↻', 'restart', 'Restart');
-    this.btnAirport = mkBtn('⌂', 'airport', 'Return to airport');
-    this.btnMute = mkBtn('🔊', 'mute', 'Mute sound (M)');
-    this.btnHelp = mkBtn('?', 'help', 'Show controls (H)');
-    wrap.appendChild(buttons);
+
+    this.btnPause = mkBtn('pause', 'pause', 'Pause (Esc)', dock);
+    this.btnCamera = mkBtn('camera', 'camera', 'Change camera (C)', dock);
+    this.btnMore = el('button', 'hud-btn');
+    this.btnMore.innerHTML = icon('more', 20);
+    this.btnMore.title = 'More';
+    this.btnMore.setAttribute('aria-label', 'More controls');
+    this.btnMore.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.btnMore.blur();
+      // Toggle from our own flag rather than from the DOM. Reading `hidden`
+      // back meant that anything else touching the attribute — or the handler
+      // firing twice — left the button lit with no way to put it out.
+      this.setTrayOpen(!this.trayOpen);
+    });
+    dock.appendChild(this.btnMore);
+
+    this.btnGuide = mkBtn('route', 'guide', 'Guidance lines on/off (N)', tray, 'Guidance');
+    this.btnAuto = mkBtn('autopilot', 'autopilot', 'Autopilot on/off (P)', tray, 'Autopilot');
+    this.btnCinematic = mkBtn('cinematic', 'hideUi', 'Hide the interface for a clean shot (U)', tray, 'Hide interface');
+    this.btnAirport = mkBtn('tower', 'airport', 'Return to the airfield', tray, 'Back to the airfield');
+    this.btnRestart = mkBtn('restart', 'restart', 'Start this flight again', tray, 'Restart');
+    this.btnMute = mkBtn('soundOn', 'mute', 'Mute sound (M)', tray, 'Sound');
+    this.btnHelp = mkBtn('help', 'help', 'Show controls (H)', tray, 'Controls');
+    this.btnKeys = mkBtn('help', 'keys', 'Show which keys you are pressing', tray, 'Key monitor');
+
+    this.tray = tray;
+    this.trayOpen = false;
+    tray.style.display = 'none';
+    wrap.appendChild(tray);
+    wrap.appendChild(dock);
+
+    // Clicking anywhere else, or pressing Escape, puts it away. A menu you can
+    // only close by using it is a menu you are stuck in.
+    document.addEventListener('click', (e) => {
+      if (!this.trayOpen) return;
+      if (tray.contains(e.target) || this.btnMore.contains(e.target)) return;
+      this.setTrayOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.trayOpen) this.setTrayOpen(false);
+    });
 
     /* ---- Centre overlays ---- */
     this.stallWarn = el('div', 'hud-stall', 'STALL — LOWER THE NOSE');
@@ -194,6 +263,54 @@ export class Hud {
     this.controlsCard = el('div', 'hud-controls-card');
     this.controlsCard.style.display = 'none';
     wrap.appendChild(this.controlsCard);
+
+    /*
+     * The key monitor: a little keyboard that lights up as you fly.
+     *
+     * Useful for two quite different things — seeing that a key really is
+     * registering when the aeroplane is not doing what you expect, and
+     * watching what your own hands are doing, which is how you notice you have
+     * been holding right rudder for the last minute. Off by default and
+     * toggled from its own button, because it is a diagnostic, not furniture.
+     */
+    this.keyMon = el('div', 'hud-keys');
+    this.keyMon.style.display = 'none';
+    this.keyCells = {};
+    const KEY_ROWS = [
+      [
+        ['KeyQ', 'Q'],
+        ['KeyW', 'W'],
+        ['KeyE', 'E'],
+      ],
+      [
+        ['KeyA', 'A'],
+        ['KeyS', 'S'],
+        ['KeyD', 'D'],
+      ],
+      [
+        ['ShiftLeft', '⇧ pwr'],
+        ['Space', '␣ brk'],
+        ['ControlLeft', '⌃ pwr'],
+      ],
+      [
+        ['KeyF', 'F'],
+        ['KeyV', 'V'],
+        ['KeyG', 'G'],
+      ],
+    ];
+    for (const row of KEY_ROWS) {
+      const r = el('div', 'hud-keys-row');
+      for (const [code, label] of row) {
+        const cell = el('div', 'hud-key', label);
+        this.keyCells[code] = cell;
+        r.appendChild(cell);
+      }
+      this.keyMon.appendChild(r);
+    }
+    // Stick position, which is the thing the keys are actually driving.
+    this.keyAxes = el('div', 'hud-keys-axes');
+    this.keyMon.appendChild(this.keyAxes);
+    wrap.appendChild(this.keyMon);
 
     this.root.appendChild(wrap);
   }
@@ -261,6 +378,21 @@ export class Hud {
   }
 
   /** One short instruction naming the key to press, or null to hide it. */
+  /**
+   * Show or clear the taxi strip.
+   * @param {string|null} text  the instruction, or null to hide the strip
+   */
+  setTaxi(text, hint) {
+    if (!text) {
+      this.taxi.style.display = 'none';
+      return;
+    }
+    this.taxi.style.display = '';
+    if (this.taxiText.textContent !== text) this.taxiText.textContent = text;
+    this.taxiHint.textContent = hint || '';
+    this.taxiHint.style.display = hint ? '' : 'none';
+  }
+
   setCoach(text) {
     if (!text) {
       if (this.coach.style.display !== 'none') this.coach.style.display = 'none';
@@ -287,6 +419,7 @@ export class Hud {
     for (const t of this.toasts) t.node.remove();
     this.toasts.length = 0;
     this.setCoach(null);
+    this.setTaxi(null);
     this.papiHint.style.display = 'none';
     this.stallWarn.style.display = 'none';
     this.lastValues = {};
@@ -333,9 +466,81 @@ export class Hud {
     this.subtitleTimer = Math.max(2.4, duration || 3.5);
   }
 
+  /**
+   * A hazard you need to keep track of — currently the tornado.
+   *
+   * You cannot fly away from something you cannot find, and a funnel two
+   * kilometres off is small in a big sky. This says where it is and how far,
+   * and updates as you move.
+   */
+  setHazard(text) {
+    if (!this.hazard) {
+      this.hazard = el('div', 'hud-hazard');
+      this.hazard.style.display = 'none';
+      this.wrap.appendChild(this.hazard);
+    }
+    if (!text) {
+      this.hazard.style.display = 'none';
+      return;
+    }
+    this.hazard.innerHTML = text;
+    this.hazard.style.display = '';
+  }
+
+  /** Name of the aeroplane, shown on the top strip. */
+  setAircraftName(name) {
+    if (this.acName) this.acName.textContent = name || '';
+  }
+
+  /**
+   * The realistic cockpit has real instruments on the panel, so the overlay
+   * that repeats them is just clutter in front of the windscreen.
+   */
+  /**
+   * Lightning strike: the instruments die.
+   *
+   * Dimming them alone was too quiet to notice. Now the panels go dark, a red
+   * caption pulses where they were, and when the power comes back they fade in
+   * rather than snapping — which is both nicer to look at and closer to what
+   * an instrument does when it spins back up.
+   */
+  setBlackout(on) {
+    const want = !!on;
+    if (want === this._blackout) return;
+    this._blackout = want;
+    this.wrap.classList.toggle('is-blackout', want);
+    if (!this.blackoutSign) {
+      this.blackoutSign = el('div', 'hud-blackout', 'INSTRUMENTS');
+      this.wrap.appendChild(this.blackoutSign);
+    }
+    this.blackoutSign.classList.toggle('is-on', want);
+    if (!want) {
+      // Fade back in: the class comes off, the transition does the rest.
+      this.wrap.classList.add('is-recovering');
+      clearTimeout(this._recoverTimer);
+      this._recoverTimer = setTimeout(() => this.wrap.classList.remove('is-recovering'), 1400);
+    }
+  }
+
+  setMinimal(on) {
+    this.wrap.classList.toggle('is-minimal', !!on);
+  }
+
   setMuted(m) {
-    this.btnMute.textContent = m ? '🔇' : '🔊';
+    this.btnMute.innerHTML = icon(m ? 'soundOff' : 'soundOn', 20) + `<span>${m ? 'Sound off' : 'Sound on'}</span>`;
     this.btnMute.classList.toggle('is-off', m);
+  }
+
+  /** Open or close the overflow tray of quick buttons. */
+  setTrayOpen(open) {
+    if (!this.tray) return;
+    this.trayOpen = !!open;
+    this.tray.hidden = !this.trayOpen;
+    // Belt and braces: the attribute is the truth, but an inline style cannot
+    // be beaten by a stylesheet rule loading in a different order.
+    this.tray.style.display = this.trayOpen ? '' : 'none';
+    this.btnMore.classList.toggle('is-on', this.trayOpen);
+    this.btnMore.setAttribute('aria-expanded', this.trayOpen ? 'true' : 'false');
   }
 
   /** Light the guidance button when the rails are showing. */
@@ -351,11 +556,44 @@ export class Hud {
     if (this.btnAuto) this.btnAuto.classList.toggle('is-on', !!on);
   }
 
+  /** Show or hide the key monitor. @returns {boolean} whether it is now on */
+  toggleKeyMonitor(force) {
+    const on = force === undefined ? this.keyMon.style.display === 'none' : !!force;
+    this.keyMon.style.display = on ? '' : 'none';
+    if (this.btnKeys) this.btnKeys.classList.toggle('is-on', on);
+    return on;
+  }
+
+  /** Light up whichever keys are down, and show where the stick actually is. */
+  updateKeyMonitor(input, ac) {
+    if (this.keyMon.style.display === 'none' || !input) return;
+    for (const code in this.keyCells) {
+      // Arrow keys double for power, so treat them as the same cell.
+      const alt =
+        code === 'ShiftLeft' ? 'ArrowUp' : code === 'ControlLeft' ? 'ArrowDown' : null;
+      const down = input.keys.has(code) || (alt && input.keys.has(alt));
+      this.keyCells[code].classList.toggle('is-down', !!down);
+    }
+    /*
+     * The live control positions live on the aeroplane, not on the input —
+     * `input.controls` does not exist, and falling back to `input` itself gave
+     * a readout that sat at zero however hard you pulled. Reading the surfaces
+     * is also more honest: it shows where the controls actually are after the
+     * assists have had their say, which is the interesting number.
+     */
+    const c = (ac && ac.controls) || {};
+    const pct = (v) => `${Math.round(clamp(v, -1, 1) * 100)}`;
+    this.keyAxes.textContent =
+      `pitch ${pct(c.pitch || 0)}  roll ${pct(c.roll || 0)}  ` +
+      `yaw ${pct(c.yaw || 0)}  thr ${Math.round((c.throttle || 0) * 100)}`;
+  }
+
   /** Main per-frame refresh. */
   update(dt, sim) {
     const ac = sim.aircraft;
     const r = ac.readouts();
     const w = sim.weather;
+    this.updateKeyMonitor(sim.input, ac);
 
     // --- Numbers with plain-language captions ---
     const ias = Math.round(r.iasKts);

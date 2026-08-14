@@ -31,6 +31,13 @@ export const VIEW_LABELS = {
  * aircraft feels like.
  */
 const EYE = new THREE.Vector3(-0.24, 0.46, 0.06);
+/**
+ * The realistic cockpit view sits further back and sees less at once — you
+ * look through the windscreen over the glareshield rather than floating in
+ * front of the aeroplane with a wide-angle lens. It is what the pilot sees.
+ */
+const REALISTIC_FOV = 56;
+const REALISTIC_OFFSET = new THREE.Vector3(0, -0.02, 0.16);
 
 export class CameraRig {
   constructor(camera, aircraft) {
@@ -38,6 +45,9 @@ export class CameraRig {
     this.ac = aircraft;
     this.mode = 'chase';
     this.reducedMotion = false;
+    /** Eye point for the cockpit view; set per aeroplane. */
+    this.eye = EYE.clone();
+    this.realisticCockpit = false;
 
     this.chasePos = new THREE.Vector3();
     this.chaseVel = new THREE.Vector3();
@@ -97,7 +107,11 @@ export class CameraRig {
 
     if (this.mode === 'cockpit') {
       // Eye point rides with the airframe.
-      const eye = this._tmp.copy(EYE).applyQuaternion(ac.quat).add(pos);
+      const base = this.eye || EYE;
+      this._eyeTmp = this._eyeTmp || new THREE.Vector3();
+      this._eyeTmp.copy(base);
+      if (this.realisticCockpit) this._eyeTmp.add(REALISTIC_OFFSET);
+      const eye = this._tmp.copy(this._eyeTmp).applyQuaternion(ac.quat).add(pos);
       cam.position.copy(eye);
       cam.position.x += sx * 0.5;
       cam.position.y += sy * 0.5;
@@ -109,7 +123,8 @@ export class CameraRig {
       const headPitch = lookPitch + clamp(ac.gLoad - 1, -0.4, 0.4) * -0.06;
       const q = this._q.setFromEuler(new THREE.Euler(headPitch, headYaw, 0, 'YXZ'));
       cam.quaternion.copy(this._targetQ).multiply(q);
-      cam.fov = lerp(cam.fov, this.baseFov + clamp(ac.airspeed / 90, 0, 1) * 4, clamp(dt * 3, 0, 1));
+      const want = this.realisticCockpit ? REALISTIC_FOV : this.baseFov + clamp(ac.airspeed / 90, 0, 1) * 4;
+      cam.fov = lerp(cam.fov, want, clamp(dt * 3, 0, 1));
       cam.near = 0.08;
     } else if (this.mode === 'chase') {
       // Behind and above, blended between body-axis and velocity-axis so the

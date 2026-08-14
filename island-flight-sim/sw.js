@@ -9,7 +9,7 @@
  * Bump CACHE_VERSION when you change any game file.
  */
 
-const CACHE_VERSION = 'island-flight-v13';
+const CACHE_VERSION = 'island-flight-v24';
 
 const PRECACHE = [
   './',
@@ -57,6 +57,7 @@ const PRECACHE = [
   'src/game/markers.js',
   'src/game/atc-director.js',
   'src/game/navguide.js',
+  'src/game/taxi.js',
 
   'src/ui/hud.js',
   'src/ui/menus.js',
@@ -110,6 +111,50 @@ self.addEventListener('fetch', (event) => {
 
   // Never cache the source ZIP — it is large and only ever downloaded once.
   if (url.pathname.includes('/download/')) return;
+
+  /*
+   * Code goes to the network first; everything else comes from the cache first.
+   *
+   * The whole app used to be cache-first with a background refresh, which
+   * meant a change only appeared on the *second* load — and with the cache
+   * version left at v14 while the game reached v23, it often never appeared at
+   * all. Several bugs were reported as "still broken" when they had in fact
+   * been fixed; the browser was simply showing code from weeks earlier.
+   *
+   * Markup, styles and modules are small, so asking the network for them costs
+   * little and guarantees the running game is the game as written. If the
+   * network does not answer within a moment — or at all, which is the point of
+   * an offline game — the cached copy is served exactly as before.
+   */
+  const isCode = /\.(js|css|html|webmanifest)$/.test(url.pathname) || req.mode === 'navigate';
+
+  if (isCode) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE_VERSION);
+        try {
+          const fresh = await Promise.race([
+            fetch(req),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 2500)),
+          ]);
+          if (fresh && fresh.ok && fresh.type === 'basic') await cache.put(req, fresh.clone());
+          return fresh;
+        } catch (err) {
+          const hit = await cache.match(req, { ignoreSearch: true });
+          if (hit) return hit;
+          if (req.mode === 'navigate') {
+            const shell = await cache.match('index.html');
+            if (shell) return shell;
+          }
+          return new Response('Offline and this file is not cached.', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain' },
+          });
+        }
+      })()
+    );
+    return;
+  }
 
   event.respondWith(
     (async () => {

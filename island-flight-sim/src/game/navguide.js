@@ -106,7 +106,18 @@ class Rail {
       // Thicker further away so the rail keeps a steady width on screen, and
       // tapered towards the target so it reads as pointing somewhere.
       const dist = _v3.length();
-      const w = clamp(dist * 0.0032, 0.35, 18) * (1 - t * 0.55);
+      /*
+       * Keep a roughly constant width on screen — but only roughly.
+       *
+       * This widens each segment by its own distance from the eye, so a rail
+       * running away from you gets steadily fatter with range: it stops being
+       * a rail and becomes a wedge. At the old 0.0032 with an 18 m cap, a
+       * guide to a target a few kilometres off was a 36 m slab lying across
+       * the sea and the island, at 85% opacity — you could not see the world
+       * for the guidance. Halved the rate and cut the cap to 5 m, which keeps
+       * it readable at range without painting over the view.
+       */
+      const w = clamp(dist * 0.0016, 0.3, 5) * (1 - t * 0.55);
       const a = i * 6;
       p[a] = _v2.x - _v4.x * w;
       p[a + 1] = _v2.y - _v4.y * w;
@@ -192,7 +203,9 @@ export class NavGuide {
     _colour.copy(dist < 900 ? COLOUR_NEAR : COLOUR_FAR);
     // Fade the whole thing out when you are practically on top of the target,
     // so it never sits between you and the runway during the flare.
-    const opacity = clamp((dist - 90) / 260, 0, 1) * 0.85;
+    // Faint enough to be guidance rather than scenery. It is a hint about
+    // where to point, not a feature of the island.
+    const opacity = clamp((dist - 90) / 260, 0, 1) * 0.42;
     this.left.mat.uniforms.uOpacity.value = opacity;
     this.right.mat.uniforms.uOpacity.value = opacity;
     if (opacity <= 0.001) {

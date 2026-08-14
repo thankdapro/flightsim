@@ -17,8 +17,9 @@
  */
 
 import * as THREE from '../vendor/three.module.js';
+import { getAircraft, specFor, DEFAULT_AIRCRAFT_ID } from './types.js';
 import { clamp, lerp } from '../core/noise.js';
-import { heightAt, isPaved, isOnRunway } from '../world/terrain.js';
+import { heightAt, isPaved, isOnRunway, obstacleAt } from '../world/terrain.js';
 
 const RHO0 = 1.225;
 const G = 9.80665;
@@ -26,58 +27,27 @@ const KTS = 1.94384; // m/s → knots
 const FPM = 196.85; // m/s → feet per minute
 const FT = 3.28084;
 
-export const SPEC = {
-  mass: 1100, // kg
-  wingArea: 16.2, // m²
-  wingSpan: 11, // m
-  chord: 1.47,
-  Ixx: 1800, // pitch
-  Iyy: 2600, // yaw
-  Izz: 1300, // roll
-  CL0: 0.25,
-  CLa: 5.0, // per radian
-  alphaStall: 0.29, // ~16.6°
-  CD0: 0.044, // zero-lift drag, tuned so full-throttle cruise is ~128 kt
-  k: 0.0545, // induced drag factor
-  CYb: -0.31, // side force per radian of sideslip
-  // Stability derivatives are per radian of angle or angular rate. The three
-  // control-power terms (Cmde, Clda, Cndr) are per *unit of control input*
-  // (-1..1) instead, and are tuned so full deflection gives the response rates
-  // a light trainer actually has: ~90°/s roll, ~40°/s pitch, ~1 rad/s² of yaw.
-  Cmalpha: -1.05, // pitch stiffness (negative = stable)
-  Cmq: -16.0, // pitch damping
-  Cmde: -0.75, // elevator power (per unit input)
-  Clb: -0.09, // dihedral effect (roll due to sideslip)
-  Clp: -0.52, // roll damping
-  Clda: 0.075, // aileron power (per unit input)
-  Cnb: 0.083, // weathercock stability (magnitude)
-  Cnr: -0.11, // yaw damping
-  Cndr: 0.009, // rudder power (per unit input; positive yaws right)
-  thrustMax: 3400, // N at full throttle, static (short, forgiving take-off run)
-  fuelCapacity: 160, // litres
-  fuelBurnMax: 0.0105, // litres/second at full power ≈ 38 L/h
-  gearDragArea: 0.55,
-  maxGearSpeed: 74, // m/s — above this, gear stays put
-  vne: 82, // m/s never-exceed (~160 kt)
-  // `travel` is the usable strut stroke; past it the leg hits a mechanical stop
-  // and `stopRate` multiplies the stiffness, exactly like a real oleo. The stop
-  // is what stops brake torque from pitching the aeroplane onto its propeller.
-  gearPoints: [
-    { name: 'nose', pos: new THREE.Vector3(0, -1.42, -1.15), steer: true, brake: false, k: 26000, c: 4200, travel: 0.2, stopRate: 60 },
-    { name: 'left', pos: new THREE.Vector3(-1.42, -1.5, 0.42), steer: false, brake: true, k: 34000, c: 5200, travel: 0.26, stopRate: 50 },
-    { name: 'right', pos: new THREE.Vector3(1.42, -1.5, 0.42), steer: false, brake: true, k: 34000, c: 5200, travel: 0.26, stopRate: 50 },
-  ],
-  // Points that must never touch the ground. These match the drawn aeroplane:
-  // propeller tip below the spinner, both wing tips (high wing, so well up),
-  // the tail cone and the belly.
-  hardPoints: [
-    { pos: new THREE.Vector3(0, -0.9, -2.6), what: 'The propeller struck the ground' },
-    { pos: new THREE.Vector3(-5.5, 0.72, -0.5), what: 'The left wing tip hit the ground' },
-    { pos: new THREE.Vector3(5.5, 0.72, -0.5), what: 'The right wing tip hit the ground' },
-    { pos: new THREE.Vector3(0, -0.12, 3.85), what: 'The tail struck the ground' },
-    { pos: new THREE.Vector3(0, -0.82, 0.3), what: 'The belly hit the ground' },
-  ],
-};
+/**
+ * The aeroplane currently being flown, and the numbers that describe it.
+ *
+ * These are `let`, not `const`, and every module that imports them gets a live
+ * binding — so choosing a different aeroplane in the hangar really does change
+ * what you are flying, with no reload. Same trick the maps use.
+ *
+ * All the stability derivatives are per radian of angle or angular rate. The
+ * three control-power terms (Cmde, Clda, Cndr) are per *unit of control input*
+ * (-1..1) instead. `gearPoints` and `hardPoints` are worked out from the same
+ * shape the model is drawn from, so the wheels touch where they look like they
+ * touch. See types.js.
+ */
+export let TYPE = getAircraft(DEFAULT_AIRCRAFT_ID);
+export let SPEC = specFor(DEFAULT_AIRCRAFT_ID);
+
+export function applyAircraft(id) {
+  TYPE = getAircraft(id);
+  SPEC = specFor(TYPE.id);
+  return TYPE;
+}
 
 export const EVENTS = {
   TOUCHDOWN: 'touchdown',
@@ -111,6 +81,24 @@ export class Aircraft {
     this.parkingBrake = true;
 
     this.engineOn = false;
+    /**
+     * Things that have gone wrong. Nothing here happens on its own — every one
+     * is armed deliberately from the Free Flight triggers panel, so an ordinary
+     * flight is never sabotaged by surprise.
+     */
+    this.failures = {
+      engine: false, // dead engine, and it will not restart
+      fuelLeak: false, // empties the tanks several times faster than normal
+      elevator: false, // pitch control jammed where you left it
+      icing: false, // drag up, lift down, stall comes earlier
+      gear: false, // undercarriage stuck where it is
+      brakes: false, // no wheel braking at all
+      roughEngine: false, // running on part power, and shaking
+      tyre: false, // a burst main tyre, which drags to one side
+    };
+    this._jammedPitch = null;
+    /** Seconds the tanks last once a leak starts. */
+    this.fuelLeakSeconds = 260;
     this.starting = 0;
     this.rpm = 0;
     this.fuel = SPEC.fuelCapacity;
@@ -192,11 +180,21 @@ export class Aircraft {
       this.vel.copy(this._tmp).multiplyScalar(speed);
     }
     if (altAGL !== null) this.pos.y = heightAt(pos.x, pos.z) + altAGL;
-    else this.pos.y = heightAt(pos.x, pos.z) + 1.5;
+    else {
+      // Stand it on its wheels. This used to be a flat 1.5 m, which is the
+      // trainer's undercarriage and nobody else's — so the bigger aeroplanes
+      // spawned with their wheels below the tarmac and their tails in it, and
+      // once the springs were stiff enough to actually hold their weight, that
+      // buried spring fired them a hundred metres into the air on frame one.
+      const lowest = SPEC.gearPoints.reduce((m, g) => Math.min(m, g.pos.y), 0);
+      this.pos.y = heightAt(pos.x, pos.z) - lowest;
+    }
     this._spawnOnGround = altAGL === null;
     this.gearDown = gearDown;
     this.gearPos = gearDown ? 1 : 0;
     this.engineOn = engineOn;
+    for (const k in this.failures) this.failures[k] = false;
+    this._jammedPitch = null;
     this.rpm = engineOn ? 0.18 : 0;
     this.fuel = SPEC.fuelCapacity * fuel;
     this.crashed = false;
@@ -316,7 +314,7 @@ export class Aircraft {
   }
 
   startEngine() {
-    if (this.engineOn || this.fuel <= 0) return;
+    if (this.engineOn || this.fuel <= 0 || this.failures.engine) return;
     this.starting = 1.8;
     this.emit(EVENTS.ENGINE_START, {});
   }
@@ -349,6 +347,7 @@ export class Aircraft {
       }
     }
     if (this.fuel <= 0 && this.engineOn) this.stopEngine('fuel');
+    if (this.failures.engine && this.engineOn) this.stopEngine('failure');
 
     const targetRpm = this.engineOn ? 0.18 + this.controls.throttle * 0.82 : 0;
     // Engines spool with lag; spin-down is slower than spin-up.
@@ -360,6 +359,13 @@ export class Aircraft {
       const burn = this.realisticFuel
         ? SPEC.fuelCapacity * (0.01 / 30)
         : SPEC.fuelBurnMax * (0.16 + this.controls.throttle * 0.84);
+      // A leak takes fuel whether the engine wants it or not.
+      if (this.failures.fuelLeak) {
+        // How long the tanks last with the leak — set on the Free Flight
+        // screen, and a sensible default when triggered from the pause menu.
+        const seconds = this.fuelLeakSeconds || 260;
+        this.fuel = Math.max(0, this.fuel - (SPEC.fuelCapacity / seconds) * dt);
+      }
       this.fuel = Math.max(0, this.fuel - burn * dt);
       const pct = this.fuel / SPEC.fuelCapacity;
       if (pct < 0.12 && !this._lowFuelWarned) {
@@ -369,8 +375,17 @@ export class Aircraft {
       if (pct > 0.2) this._lowFuelWarned = false;
     }
 
-    // Gear animation.
-    const gearTarget = this.gearDown ? 1 : 0;
+    // A jammed elevator stays exactly where it was when it jammed — you fly
+    // on trim, power and the rudder, which is the whole exercise.
+    if (this.failures.elevator) {
+      if (this._jammedPitch === null) this._jammedPitch = this.controls.pitch;
+      this.controls.pitch = this._jammedPitch;
+    } else {
+      this._jammedPitch = null;
+    }
+
+    // Gear animation. A jammed undercarriage does not move.
+    const gearTarget = this.failures.gear ? this.gearPos : this.gearDown ? 1 : 0;
     this.gearPos += clamp(gearTarget - this.gearPos, -dt / 2.4, dt / 2.4);
 
     // Flaps run out slowly, like an electric flap motor.
@@ -384,7 +399,9 @@ export class Aircraft {
     }
     if (!this.onGround) this._rollHeading = null;
     else if (this._rollHeading === null && this.groundSpeed < 2) this._rollHeading = this.heading;
-    const brakeInput = Math.max(this.controls.brakes, this.parkingBrake ? 1 : 0);
+    const brakeInput = this.failures.brakes
+      ? 0
+      : Math.max(this.controls.brakes, this.parkingBrake ? 1 : 0);
 
     // ---- Relative wind ------------------------------------------------
     const wind = weather.windVector(this._tmp);
@@ -395,7 +412,21 @@ export class Aircraft {
     const gustScale = this.mode === 'simplified' ? 0.45 : 1;
     this._airRel.copy(this.vel);
     this._airRel.x -= wind.x + gust.x * gustScale;
-    this._airRel.y -= gust.y * 0.6 * gustScale;
+    // Sinking air in a microburst. This is felt in full in both modes: the
+    // whole point of it is that no amount of assist saves you, only flying out
+    // of it does.
+    this._airRel.y -= gust.y * 0.6 * gustScale - (weather.downdraft || 0);
+
+    // A tornado is a place rather than a number, so its wind depends on where
+    // you are: spin around the core, inflow towards it, and a violent
+    // updraught in the middle. Felt in full in both modes, for the same reason.
+    if (weather.vortex && weather.vortex.active) {
+      this._vortex = this._vortex || new THREE.Vector3();
+      const vw = weather.vortex.windAt(this.pos, this._vortex);
+      this._airRel.x -= vw.x;
+      this._airRel.y -= vw.y;
+      this._airRel.z -= vw.z;
+    }
     this._airRel.z -= wind.z + gust.z * gustScale;
 
     const V = this._airRel.length();
@@ -478,15 +509,88 @@ export class Aircraft {
       // strong on the approach.
       if (!this.onGround && V > 14) {
         if (Math.abs(this.controls.roll) < 0.06) {
+          // Wings level.
+          //
+          // These gains used to be two constants tuned on the trainer, and
+          // they did not survive meeting a different aeroplane. The trainer
+          // has enormous natural roll damping; the fighter has about a third
+          // of it for the same aileron response, so the same gain gave a
+          // damping ratio of 0.35, the control-rate limit added lag on top,
+          // and the assist drove a roll oscillation out to 58 degrees of bank
+          // at 200 degrees a second with the stick centred. The airframe was
+          // fine — in realistic mode, with no assist, it held the wings level
+          // to a tenth of a degree.
+          //
+          // So the gains are worked out from the aeroplane instead. `A` is the
+          // roll acceleration a unit of aileron actually buys and `D` is the
+          // damping the airframe already has; solving for a fixed natural
+          // frequency and damping ratio gives an assist that feels the same in
+          // all five and is stable in all five.
           const bank = this.bankAngleRad();
-          aileron = clamp(aileron - bank * 1.7 - this.omega.z * 0.42, -1, 1);
+          const qNow = 0.5 * this.density * V * V;
+          const b = SPEC.wingSpan;
+          const base = (qNow * SPEC.wingArea * b) / SPEC.Izz;
+          const A = Math.max(0.5, base * SPEC.Clda); // roll accel per unit aileron
+          const D = Math.abs(base * SPEC.Clp * (b / (2 * V))); // natural damping
+          // How brisk the leveller is allowed to be.
+          //
+          // A fixed 3.5 rad/s worked on the light aeroplanes and wrecked the
+          // fighter, whose Dutch roll sits near 1 rad/s: a roll loop running
+          // three times faster than the aeroplane's own lateral mode fights
+          // it, and the two argue. So the leveller is tied to that mode — it
+          // stays comfortably slower than the aeroplane's natural wallow and
+          // therefore damps it instead of exciting it.
+          const baseYaw = (qNow * SPEC.wingArea * b) / SPEC.Iyy;
+          const wnDutch = Math.sqrt(Math.max(0.05, baseYaw * SPEC.Cnb));
+          const WN = clamp(0.8 * wnDutch, 1.2, 3.5);
+          const ZETA = 1.15; // a shade over-damped, so it never overshoots
+          // Bound the *gain*, not the output. Clipping the output was the
+          // first attempt and it made the assist a bang-bang controller: on a
+          // fast jet at low speed the demand ran into the limit at any real
+          // bank angle, so it slammed to one end, overshot, slammed to the
+          // other, and rang for half a minute. Limiting the proportional gain
+          // instead keeps the loop linear, and the damping term is then solved
+          // for whatever frequency that gain actually achieves — so it stays
+          // properly damped rather than merely quiet.
+          const kp = (WN * WN) / A;
+          const kd = Math.max(0, (2 * ZETA * WN - D) / A);
+          aileron = clamp(aileron - bank * kp - this.omega.z * kd, -1, 1);
         }
         if (Math.abs(this.controls.pitch) < 0.06) {
           // Hold height: pull when sinking, push when climbing.
           elevator = clamp(elevator - this.vs * 0.085 - this.omega.x * 0.38, -1, 1);
         }
+        // Turn coordination was tried here and taken out again: feeding rudder
+        // in proportion to sideslip acts like a bigger fin, which raises the
+        // Dutch roll frequency and *lowers* its damping ratio. It made the
+        // wallow it was meant to cure marginally worse. Yaw rate is the thing
+        // to feed back, and the yaw damper above already does that.
       }
 
+    }
+
+    // Yaw damper. Fitted to the jets, active in both modes, because it is part
+    // of the aeroplane rather than a beginner's aid. The gain is solved for
+    // each airframe: work out the Dutch roll frequency and the damping the fin
+    // already provides, then add whatever rudder is needed to bring the
+    // damping ratio up to something a passenger would not notice.
+    if (SPEC.yawDamper && !this.onGround && V > 20) {
+      const qNow = 0.5 * this.density * V * V;
+      const b = SPEC.wingSpan;
+      const baseY = (qNow * SPEC.wingArea * b) / SPEC.Iyy;
+      const wnDutch = Math.sqrt(Math.max(0.05, baseY * SPEC.Cnb));
+      const natural = Math.abs(baseY * SPEC.Cnr * (b / (2 * V)));
+      const authority = Math.max(0.02, baseY * SPEC.Cndr);
+      const want = 2 * 0.5 * wnDutch; // damping ratio one half
+      const kYaw = Math.max(0, (want - natural) / authority);
+      // Sign: Cndr is positive-yaws-right, and +Y body torque is nose LEFT, so
+      // positive rudder makes omega.y negative. To oppose a positive yaw rate
+      // the damper therefore feeds in *positive* rudder. Getting this backwards
+      // turns the damper into an oscillator, which is exactly what it did.
+      rudder = clamp(rudder + this.omega.y * kYaw, -1, 1);
+    }
+
+    if (this.mode === 'simplified') {
       // Extra elevator at low speed. Rotating for take-off and flaring for
       // landing both happen down here, and both are where beginners struggle.
       if (V < 45) elevator = clamp(elevator * (1 + (1 - V / 45) * 0.55), -1, 1);
@@ -528,7 +632,7 @@ export class Aircraft {
 
     // Lift curve with a soft stall break.
     let CL;
-    const aStall = SPEC.alphaStall - this.flaps * 0.03;
+    const aStall = SPEC.alphaStall - this.flaps * 0.03 - (this.failures.icing ? 0.06 : 0);
     const aAbs = Math.abs(this.alpha);
     const sign = this.alpha < 0 ? -1 : 1;
     if (aAbs <= aStall) {
@@ -539,15 +643,31 @@ export class Aircraft {
       const peak = (SPEC.CL0 + flapCL) * sign + SPEC.CLa * aStall * sign;
       CL = peak * Math.max(0.28, 1 - over * 2.1);
     }
-    const stalling = aAbs > aStall && V > 8;
-    if (stalling !== this.stalled) {
-      this.stalled = stalling;
-      this.emit(stalling ? EVENTS.STALL : EVENTS.STALL_RECOVER, { alpha: this.alpha });
+    /*
+     * The wing stalls at a large angle of attack either way up, so the lift
+     * curve above rightly works on |alpha|. The *warning* does not.
+     *
+     * A stall warner is a vane or a lift transducer on the leading edge, and
+     * it can only sense positive angle of attack — push the nose down hard and
+     * a real one stays silent, because you are the furthest thing from a stall
+     * that you can be. Keying the warning off |alpha| meant a firm push-over
+     * set off the stall alert, which is exactly backwards and teaches the
+     * opposite of the right reflex.
+     *
+     * Buffet keeps the symmetric test: an aeroplane held at a big negative
+     * angle really does shake, whatever the horn thinks.
+     */
+    const aerodynamicStall = aAbs > aStall && V > 8;
+    const warnStall = this.alpha > aStall && V > 8;
+    if (warnStall !== this.stalled) {
+      this.stalled = warnStall;
+      this.emit(warnStall ? EVENTS.STALL : EVENTS.STALL_RECOVER, { alpha: this.alpha });
     }
-    this.buffet = stalling ? clamp((aAbs - aStall) * 6, 0, 1) : 0;
+    this.buffet = aerodynamicStall ? clamp((aAbs - aStall) * 6, 0, 1) : 0;
 
     const gearDrag = SPEC.gearDragArea * this.gearPos * 0.02;
-    const CD = SPEC.CD0 + flapCD + SPEC.k * CL * CL + gearDrag + Math.abs(this.beta) * 0.36;
+    const CD =
+      SPEC.CD0 + (this.failures.icing ? 0.022 : 0) + flapCD + SPEC.k * CL * CL + gearDrag + Math.abs(this.beta) * 0.36;
 
     const lift = qS * CL * aeroFade;
     const drag = qS * CD;
@@ -555,7 +675,11 @@ export class Aircraft {
 
     // Thrust falls off with forward speed like a fixed-pitch propeller.
     const propEff = clamp(1 - 0.5 * (u / 100), 0.12, 1);
-    const thrust = this.rpm * SPEC.thrustMax * (rho / RHO0) * propEff * (simple ? 1.12 : 1);
+    // A rough engine still runs — it just cannot make full power, which is a
+    // far more interesting problem than one that has stopped: you can still
+    // fly, you just have to decide where you are going to get to.
+    const rough = this.failures.roughEngine ? 0.45 : 1;
+    const thrust = this.rpm * SPEC.thrustMax * (rho / RHO0) * propEff * rough * (simple ? 1.12 : 1);
 
     // Body-frame aerodynamic force.
     //
@@ -615,8 +739,9 @@ export class Aircraft {
       SPEC.Cndr * rudder - // positive rudder input yaws right
       Math.abs(SPEC.Cnr) * (r * b) / (2 * vSafe); // yaw damping
 
-    // Post-stall wing drop: one wing lets go before the other.
-    if (stalling) {
+    // Post-stall wing drop: one wing lets go before the other. This is real
+    // aerodynamics, so it follows the symmetric stall, not the warner.
+    if (aerodynamicStall) {
       Cl += Math.sin(this.pos.x * 0.3 + this.pos.z * 0.17) * 0.05 * clamp((aAbs - aStall) * 4, 0, 1);
       Cm -= 0.12 * clamp((aAbs - aStall) * 3, 0, 1); // nose drops
     }
@@ -628,8 +753,16 @@ export class Aircraft {
     // Propeller torque and P-factor: the aeroplane pulls left at high power.
     // Deliberately mild — enough to notice and correct with rudder, not enough
     // to swap ends on the runway before a beginner reacts.
-    const torqueScale = simple ? 0.25 : 0.7;
+    // Propeller effects: the slipstream corkscrewing back over the fin yaws
+    // you left, and the engine torque rolls you the other way to the
+    // propeller. Both belong to aeroplanes that have a propeller.
+    const torqueScale = (simple ? 0.25 : 0.7) * (SPEC.propeller ? 1 : 0);
     this._t.y += this.rpm * 180 * (1 - clamp(u / 60, 0, 0.8)) * torqueScale;
+    // A burst left main drags: the aeroplane pulls that way, harder the faster
+    // you are rolling, and you hold it straight on the rudder and the brakes.
+    if (this.failures.tyre && this.onGround) {
+      this._t.y += clamp(this.groundSpeed / 18, 0, 1) * SPEC.mass * 0.9;
+    }
     this._t.z += this.rpm * 90 * torqueScale;
 
     // Turbulence buffeting.
@@ -658,9 +791,14 @@ export class Aircraft {
         const overBank = Math.abs(bankNow) - 0.17; // ~10 degrees
         if (overBank > 0) this._t.z += Math.sign(bankNow) * overBank * 300000 - p * 12000;
       }
-      this._t.x -= qRate * 900;
-      this._t.y -= r * 1100;
-      this._t.z -= p * 900;
+      // These were flat torques, which meant the trainer got 0.69 rad/s² of
+      // roll damping per rad/s and the fighter — ten times the inertia — got
+      // a tenth of that. The mode that is supposed to be the forgiving one was
+      // barely helping the aeroplanes that needed it most. Scaling by inertia
+      // gives every aeroplane the same deceleration.
+      this._t.x -= qRate * 900 * (SPEC.Ixx / 1800);
+      this._t.y -= r * 1100 * (SPEC.Iyy / 2600);
+      this._t.z -= p * 900 * (SPEC.Izz / 1300);
 
       // Ground steering assist. Damping the yaw rate is what a beginner
       // actually needs: the nose then holds whatever direction it is pointing
@@ -831,6 +969,13 @@ export class Aircraft {
       const surface = overWater ? 0 : gh;
       if (world.y < surface) {
         this.crash(overWater ? 'You flew into the sea' : hp.what);
+        return;
+      }
+      // Buildings are solid now. The tower and the terminal used to be scenery
+      // you flew straight through, which rather undersold them.
+      const hit = obstacleAt(world.x, world.y, world.z);
+      if (hit) {
+        this.crash(hit.what);
         return;
       }
     }

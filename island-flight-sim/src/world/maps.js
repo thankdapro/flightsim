@@ -66,6 +66,8 @@ export const MAPS = [
       boats: 3,
     },
     weather: { time: 'day', cond: 'clear', windSpeedKts: 6, windDirDeg: 250 },
+    // Warm and green: a reef fringe in the shallows and a river off the hills.
+    features: { reef: { islands: [0, 1], colour: 0x49d6c0, width: 0.22 } },
   },
 
   {
@@ -111,6 +113,11 @@ export const MAPS = [
       boats: 2,
     },
     weather: { time: 'day', cond: 'clear', windSpeedKts: 4, windDirDeg: 270 },
+    // "Grassland" should look like farmland from the air, not one flat green.
+    features: {
+      fields: { cx: 900, cz: 300, radius: 3400, count: 90 },
+      reef: { islands: [0], colour: 0x4fc4a8, width: 0.16 },
+    },
   },
 
   {
@@ -162,6 +169,11 @@ export const MAPS = [
       boats: 4,
     },
     weather: { time: 'day', cond: 'clear', windSpeedKts: 10, windDirDeg: 110 },
+    // The point of an atoll is the reef: broad turquoise shallows ringing
+    // every cay, which is what you actually navigate by out here.
+    features: {
+      reef: { islands: [0, 1, 2, 3, 4], colour: 0x5ce0cc, width: 0.55, bright: 0.8 },
+    },
   },
 
   {
@@ -192,6 +204,9 @@ export const MAPS = [
       swell: 0x2a5c7e,
       shallow: [0.24, 0.55, 0.62],
       nightSky: 0x8ea6c4,
+      // Snow line: bare rock below the first figure, full cover above the
+      // second. Cold ridges with green valleys, which is the whole look.
+      snow: [330, 600],
     },
     outpost: { cx: -4300, cz: -800, elev: 190, halfLen: 200, halfWidth: 50, blend: 130 },
     scenery: {
@@ -209,6 +224,11 @@ export const MAPS = [
       boats: 2,
     },
     weather: { time: 'sunset', cond: 'cloudy', windSpeedKts: 16, windDirDeg: 300 },
+    // It is called Aurora Fjords: snow on the tops, and the lights after dark.
+    features: {
+      aurora: { colour: 0x4dffa8, colour2: 0x7a5cff, height: 2600 },
+      waterfalls: 5,
+    },
   },
 
   {
@@ -223,8 +243,32 @@ export const MAPS = [
     seaFloor: -48,
     islands: [
       { name: 'Ember Shelf', cx: -200, cz: 100, radius: 1900, peak: 110, seed: 307, profile: 'hills' },
-      { name: 'Mount Ember', cx: 2500, cz: -2400, radius: 2100, peak: 880, crater: 130, seed: 311, profile: 'cone' },
-      { name: 'Cinder Cone', cx: -3800, cz: 2900, radius: 900, peak: 340, crater: 60, seed: 313, profile: 'cone' },
+      {
+        name: 'Mount Ember',
+        cx: 2500,
+        cz: -2400,
+        // Taller and narrower than it was. At 880 m over a 2.1 km radius the
+        // average slope was 23 degrees, which from the air reads as a big
+        // hill; a strato-volcano is nearer 33, and that is the difference
+        // between "mountain" and "volcano" at a glance.
+        radius: 1750,
+        peak: 1150,
+        crater: 210,
+        craterRadius: 240,
+        seed: 311,
+        profile: 'cone',
+      },
+      {
+        name: 'Cinder Cone',
+        cx: -3800,
+        cz: 2900,
+        radius: 900,
+        peak: 340,
+        crater: 70,
+        craterRadius: 150,
+        seed: 313,
+        profile: 'cone',
+      },
     ],
     chunks: [
       { cx: 0, cz: 0, size: 11000, segments: 256 },
@@ -255,6 +299,14 @@ export const MAPS = [
       boats: 2,
     },
     weather: { time: 'sunset', cond: 'clear', windSpeedKts: 20, windDirDeg: 200 },
+    // An actual volcano: a lava lake in the crater, flows down the north
+    // flank, an ash column leaning away downwind and glowing rock at night.
+    features: {
+      volcano: [
+        { island: 'Mount Ember', lake: true, flows: 8, plume: true, embers: true },
+        { island: 'Cinder Cone', lake: true, flows: 2, plume: false, embers: false },
+      ],
+    },
   },
 ];
 

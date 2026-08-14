@@ -8,7 +8,7 @@
  */
 
 import * as THREE from '../vendor/three.module.js';
-import { AIRPORT, heightAt } from './terrain.js';
+import { AIRPORT, heightAt, addObstacleAt } from './terrain.js';
 import {
   runwayTexture,
   asphaltTexture,
@@ -20,6 +20,15 @@ import {
 } from '../render/textures.js';
 
 const ELEV = AIRPORT.elev;
+/** The crosswind runway, 18/36. */
+export const RUNWAY2 = {
+  ...AIRPORT.runway2,
+  elev: ELEV,
+  // 18 is flown southbound (+Z), 36 northbound.
+  thresholdNorth: new THREE.Vector3(AIRPORT.runway2.cx, ELEV, AIRPORT.runway2.cz - AIRPORT.runway2.length / 2),
+  thresholdSouth: new THREE.Vector3(AIRPORT.runway2.cx, ELEV, AIRPORT.runway2.cz + AIRPORT.runway2.length / 2),
+};
+
 export const RUNWAY = {
   ...AIRPORT.runway,
   elev: ELEV,
@@ -98,13 +107,26 @@ export class Airport {
     const shoulderMat = pavementMaterial(40, 6);
     this.group.add(slab(RUNWAY.length + 40, 62, 0, 0, ELEV + 0.02, shoulderMat));
 
+    // --- The crosswind runway, 18/36 ---
+    // Same texture, turned ninety degrees, so its painted centreline and
+    // threshold bars run the right way.
+    const r2 = RUNWAY2;
+    const r2geo = new THREE.PlaneGeometry(r2.halfWidth * 2, r2.length);
+    r2geo.rotateX(-Math.PI / 2);
+    const runway2 = new THREE.Mesh(r2geo, rwMat);
+    runway2.position.set(r2.cx, ELEV + 0.055, r2.cz);
+    runway2.receiveShadow = true;
+    this.group.add(runway2);
+    this.group.add(slab(56, r2.length + 40, r2.cx, r2.cz, ELEV + 0.02, shoulderMat));
+
     const taxiMat = pavementMaterial(40, 3);
     this.group.add(slab(880, 24, 0, -95, ELEV + 0.05, taxiMat));
     this.group.add(slab(24, 95, -430, -47, ELEV + 0.05, taxiMat));
     this.group.add(slab(24, 95, 0, -47, ELEV + 0.05, taxiMat));
 
     const apronMat = pavementMaterial(18, 6);
-    this.group.add(slab(360, 80, -80, -150, ELEV + 0.05, apronMat));
+    // Depth reaches the taxiway edge — see isPaved() in terrain.js.
+    this.group.add(slab(360, 84, -80, -148, ELEV + 0.05, apronMat));
 
     // Yellow taxi centreline paint.
     const paint = new THREE.MeshBasicMaterial({ color: 0xd9c02a, transparent: true, opacity: 0.85 });
@@ -115,6 +137,10 @@ export class Airport {
       m.position.set(x, ELEV + 0.07, z);
       this.group.add(m);
     };
+    // A link from the parallel taxiway up to the 36 threshold, so the second
+    // runway can actually be taxied to rather than admired from a distance.
+    this.group.add(slab(24, 120, r2.cx, -160, ELEV + 0.05, taxiMat));
+    stripe(0.7, 120, r2.cx, -160);
     stripe(860, 0.7, 0, -95);
     stripe(0.7, 95, -430, -47);
     stripe(0.7, 95, 0, -47);
@@ -134,44 +160,133 @@ export class Airport {
       roughness: 0.9,
     });
 
-    // Terminal.
-    const term = new THREE.Mesh(new THREE.BoxGeometry(88, 13, 26), terminalMat);
-    term.position.set(-60, ELEV + 6.5, -212);
-    term.castShadow = term.receiveShadow = true;
-    this.group.add(term);
-    const termRoof = new THREE.Mesh(new THREE.BoxGeometry(92, 1.4, 30), roofMat);
-    termRoof.position.set(-60, ELEV + 13.8, -212);
-    termRoof.castShadow = true;
-    this.group.add(termRoof);
+    // The terminal is built in apron.js, with glass, a canopy and air bridges.
 
     // Control tower: shaft + glazed cab + railing.
     const shaftMat = new THREE.MeshStandardMaterial({
       map: buildingTexture(2),
       roughness: 0.85,
     });
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 5.4, 26, 16), shaftMat);
-    shaft.position.set(40, ELEV + 13, -206);
+    // The shaft, with a stair tower up the back of it and ribs down its
+    // length so it is not a bare pipe.
+    const TX = 40;
+    const TZ = -206;
+    // Raised from 26 m. Beside a 22 m airliner the old tower barely cleared
+    // the tail, and a control tower that an aeroplane can look level at does
+    // not read as a control tower.
+    const TOWER_H = 42;
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(4.6, 6.4, TOWER_H, 20), shaftMat);
+    shaft.position.set(TX, ELEV + TOWER_H / 2, TZ);
     shaft.castShadow = shaft.receiveShadow = true;
     this.group.add(shaft);
-    const cabMat = new THREE.MeshStandardMaterial({
+    const stairs = new THREE.Mesh(new THREE.BoxGeometry(3.6, TOWER_H, 3.6), shaftMat);
+    stairs.position.set(TX, ELEV + TOWER_H / 2, TZ - 6.2);
+    stairs.castShadow = stairs.receiveShadow = true;
+    this.group.add(stairs);
+    const concreteMat = new THREE.MeshStandardMaterial({ color: 0xc3c7cb, roughness: 0.85 });
+    for (let i = 0; i < 5; i++) {
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(4.5 + i * 0.06, 4.6 + i * 0.06, 0.5, 20), concreteMat);
+      band.position.set(TX, ELEV + TOWER_H - 2 - i * 7, TZ);
+      this.group.add(band);
+    }
+    // Flared base, so it looks like it is holding something up.
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(6.4, 9.4, 4, 20), concreteMat);
+    base.position.set(TX, ELEV + 2, TZ);
+    base.receiveShadow = true;
+    this.group.add(base);
+    // Solid, all the way up to the cab.
+    addObstacleAt(TX, TZ, 15, 15, ELEV, TOWER_H + 9, 'You flew into the control tower');
+
+    // The gallery the cab sits on, with a railing round it.
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0xa8b0b8, roughness: 0.4, metalness: 0.7 });
+    const gallery = new THREE.Mesh(new THREE.CylinderGeometry(11.4, 11.4, 0.5, 20), concreteMat);
+    gallery.position.set(TX, ELEV + TOWER_H - 0.6, TZ);
+    gallery.castShadow = true;
+    this.group.add(gallery);
+    for (let i = 0; i < 20; i++) {
+      const a = (i / 20) * Math.PI * 2;
+      const postG = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1.1, 6), steelMat);
+      postG.position.set(TX + Math.cos(a) * 11.1, ELEV + TOWER_H + 0.2, TZ + Math.sin(a) * 11.1);
+      this.group.add(postG);
+    }
+    const rail = new THREE.Mesh(new THREE.TorusGeometry(11.1, 0.06, 6, 32), steelMat);
+    rail.rotation.x = Math.PI / 2;
+    rail.position.set(TX, ELEV + TOWER_H + 0.7, TZ);
+    this.group.add(rail);
+
+    // Cab. Real tower glass slopes outwards at the bottom so the controllers
+    // can look straight down at the apron without reflections in the way —
+    // which is why the cab is wider at the top than the bottom.
+    const cabMat = new THREE.MeshPhysicalMaterial({
       color: 0x9fd8ef,
-      roughness: 0.08,
-      metalness: 0.5,
+      roughness: 0.05,
+      metalness: 0.25,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
     });
-    const cab = new THREE.Mesh(new THREE.CylinderGeometry(8.5, 7, 7, 16), cabMat);
-    cab.position.set(40, ELEV + 29, -206);
+    const cab = new THREE.Mesh(new THREE.CylinderGeometry(9.4, 7.6, 7, 16, 1, true), cabMat);
+    cab.position.set(TX, ELEV + TOWER_H + 3.4, TZ);
     cab.castShadow = true;
     this.group.add(cab);
-    const cabRoof = new THREE.Mesh(new THREE.CylinderGeometry(9.6, 9.6, 0.8, 16), roofMat);
-    cabRoof.position.set(40, ELEV + 32.8, -206);
+    // Mullions between the panes.
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      const mull = new THREE.Mesh(new THREE.BoxGeometry(0.16, 7.2, 0.3), steelMat);
+      const r = 8.5;
+      mull.position.set(TX + Math.cos(a) * r, ELEV + TOWER_H + 3.4, TZ + Math.sin(a) * r);
+      mull.rotation.y = -a;
+      mull.rotation.x = 0.12; // follow the slope of the glass
+      this.group.add(mull);
+    }
+    // The lit room inside, so there is obviously somebody up there at night.
+    const roomMat = new THREE.MeshBasicMaterial({ color: 0x9fd0a8, transparent: true, opacity: 0.12 });
+    const room = new THREE.Mesh(new THREE.CylinderGeometry(7.4, 6.6, 6.4, 16), roomMat);
+    room.position.set(TX, ELEV + TOWER_H + 3.2, TZ);
+    this.group.add(room);
+    this.towerRoom = room.material;
+    // Consoles round the inside edge.
+    const deskMat = new THREE.MeshStandardMaterial({ color: 0x2b3138, roughness: 0.7 });
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const desk = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.0, 1.4), deskMat);
+      desk.position.set(TX + Math.cos(a) * 6.2, ELEV + TOWER_H + 0.6, TZ + Math.sin(a) * 6.2);
+      desk.rotation.y = -a;
+      this.group.add(desk);
+    }
+
+    // Roof: a shallow cone with an overhanging brow that shades the glass.
+    const cabRoof = new THREE.Mesh(new THREE.ConeGeometry(10.6, 2.2, 16), roofMat);
+    cabRoof.position.set(TX, ELEV + TOWER_H + 8, TZ);
+    cabRoof.castShadow = true;
     this.group.add(cabRoof);
+    const brow = new THREE.Mesh(new THREE.CylinderGeometry(10.8, 10.8, 0.4, 16), concreteMat);
+    brow.position.set(TX, ELEV + TOWER_H + 7, TZ);
+    this.group.add(brow);
+
+    // Mast, aerials and the radar dish on top.
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.22, 6, 8), steelMat);
+    mast.position.set(TX, ELEV + TOWER_H + 12, TZ);
+    this.group.add(mast);
+    for (const [ax, az, len] of [[1.6, 0, 2.2], [-1.6, 0, 2.0], [0, 1.6, 1.8]]) {
+      const aerial = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, len, 6), steelMat);
+      aerial.position.set(TX + ax, ELEV + TOWER_H + 10.5, TZ + az);
+      this.group.add(aerial);
+    }
+    const dish = new THREE.Mesh(
+      new THREE.SphereGeometry(1.5, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.45),
+      new THREE.MeshStandardMaterial({ color: 0xdfe3e7, roughness: 0.45, metalness: 0.3, side: THREE.DoubleSide })
+    );
+    dish.position.set(TX, ELEV + TOWER_H + 9.6, TZ);
+    dish.rotation.x = Math.PI * 0.72;
+    this.group.add(dish);
+    this.towerDish = dish;
+
     const beacon = new THREE.Mesh(
       new THREE.SphereGeometry(0.9, 10, 8),
       new THREE.MeshBasicMaterial({ color: 0x35ff6a })
     );
-    beacon.position.set(40, ELEV + 34, -206);
+    beacon.position.set(TX, ELEV + TOWER_H + 15.2, TZ);
     this.group.add(beacon);
     this.beacon = beacon;
 
@@ -189,9 +304,15 @@ export class Airport {
     hangarMat.map = hangarTexRepeat;
 
     for (let i = 0; i < 2; i++) {
-      const x = -250 + i * 130;
+      const x = -250 + i * 150;
+      // Bigger: an 18 m arch is only three times the height of the airliner
+      // that is supposed to fit inside it. And solid — you cannot fly through
+      // a hangar any more.
+      const HANGAR_R = 26;
+      const HANGAR_L = 62;
+      addObstacleAt(x, -250, HANGAR_R * 2, HANGAR_L, ELEV, HANGAR_R, 'You flew into a hangar');
       const arch = new THREE.Mesh(
-        new THREE.CylinderGeometry(18, 18, 44, 20, 1, true, 0, Math.PI),
+        new THREE.CylinderGeometry(HANGAR_R, HANGAR_R, HANGAR_L, 20, 1, true, 0, Math.PI),
         hangarMat
       );
       arch.rotation.z = Math.PI / 2;
@@ -200,16 +321,16 @@ export class Airport {
       arch.castShadow = arch.receiveShadow = true;
       this.group.add(arch);
       // Back wall.
-      const back = new THREE.Mesh(new THREE.CircleGeometry(18, 20, 0, Math.PI), hangarMat);
-      back.position.set(x, ELEV + 0.2, -272);
+      const back = new THREE.Mesh(new THREE.CircleGeometry(HANGAR_R, 20, 0, Math.PI), hangarMat);
+      back.position.set(x, ELEV + 0.2, -250 - HANGAR_L / 2);
       back.castShadow = true;
       this.group.add(back);
       // Dark interior so the opening does not look like a hole in the sky.
       const inner = new THREE.Mesh(
-        new THREE.CircleGeometry(17.6, 20, 0, Math.PI),
+        new THREE.CircleGeometry(HANGAR_R - 0.4, 20, 0, Math.PI),
         new THREE.MeshBasicMaterial({ color: 0x14171c })
       );
-      inner.position.set(x, ELEV + 0.2, -271.5);
+      inner.position.set(x, ELEV + 0.2, -250 - HANGAR_L / 2 + 0.5);
       this.group.add(inner);
     }
 
@@ -362,27 +483,8 @@ export class Airport {
       c.castShadow = true;
       this.group.add(c);
     }
-    const truckBody = new THREE.Mesh(
-      new THREE.BoxGeometry(7, 2.6, 2.6),
-      new THREE.MeshStandardMaterial({ color: 0x2f6fb0, roughness: 0.5, metalness: 0.3 })
-    );
-    truckBody.position.set(30, ELEV + 1.9, -160);
-    truckBody.castShadow = true;
-    this.group.add(truckBody);
-    const cabMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(2.4, 2.2, 2.5),
-      new THREE.MeshStandardMaterial({ map: panelTexture(), roughness: 0.6 })
-    );
-    cabMesh.position.set(25.4, ELEV + 1.7, -160);
-    cabMesh.castShadow = true;
-    this.group.add(cabMesh);
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.95 });
-    for (const [wx, wz] of [[27, -158.8], [27, -161.2], [33, -158.8], [33, -161.2]]) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 0.5, 12), wheelMat);
-      w.rotation.x = Math.PI / 2;
-      w.position.set(wx, ELEV + 0.62, wz);
-      this.group.add(w);
-    }
+    // The service vehicles used to be here as a box on four cylinders. They
+    // are in apron.js now, built as things with a shape.
   }
 
   /** Toggle the airfield lighting (night / low visibility). */
@@ -391,6 +493,9 @@ export class Airport {
     this.lightsOn = on;
     this.runwayLights.visible = on;
     this.glowGroup.visible = on;
+    // Somebody is on duty up there whatever the hour, and at night you can
+    // see them.
+    if (this.towerRoom) this.towerRoom.opacity = on ? 0.4 : 0.12;
   }
 
   /**
@@ -428,6 +533,8 @@ export class Airport {
   }
 
   update(dt, weather) {
+    if (this.towerDish) this.towerDish.rotation.z += dt * 0.9;
+
     this.t += dt;
     // Windsock points downwind and lifts as the wind increases.
     const fromRad = THREE.MathUtils.degToRad(weather.windDirDeg);

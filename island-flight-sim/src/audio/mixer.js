@@ -70,13 +70,33 @@ export class AudioMixer {
     return this.buses[name] || this.master;
   }
 
+  /**
+   * Switch a whole source on or off, keeping whatever volume it had.
+   *
+   * Separate from the slider on purpose: turning the ATC down to zero and
+   * forgetting is not the same as switching the radio off, and only one of
+   * those is obvious to undo.
+   */
+  setBusEnabled(name, on) {
+    this.off = this.off || {};
+    this.off[name] = !on;
+    // Re-apply through the same path, so the switch and the slider can never
+    // disagree about what the gain ought to be.
+    this.setVolume(name, this.volumes[name] != null ? this.volumes[name] : 1);
+  }
+
+  busEnabled(name) {
+    return !(this.off && this.off[name]);
+  }
+
   setVolume(name, value) {
     this.volumes[name] = value;
     if (!this.ctx) return;
+    const gain = this.busEnabled(name) ? value : 0;
     if (name === 'master') {
-      this.master.gain.setTargetAtTime(this.muted ? 0 : value, this.time, 0.05);
+      this.master.gain.setTargetAtTime(this.muted ? 0 : gain, this.time, 0.05);
     } else if (this.buses[name]) {
-      this.buses[name].gain.setTargetAtTime(value, this.time, 0.05);
+      this.buses[name].gain.setTargetAtTime(gain, this.time, 0.05);
     }
   }
 

@@ -16,6 +16,7 @@ import {
   leatherTexture,
 } from '../render/textures.js';
 import { clamp, lerp } from '../core/noise.js';
+import { getAircraft, DEFAULT_AIRCRAFT_ID } from './types.js';
 
 /** NACA-style aerofoil outline, chord along +X, thickness along +Y. */
 function aerofoil(steps = 18, thickness = 0.13, camber = 0.022) {
@@ -136,7 +137,16 @@ function glowSprite(color, size) {
   return s;
 }
 
-export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } = {}) {
+export function createAircraftModel(opts = {}) {
+  // One builder, five aeroplanes. Everything below is driven by the shape
+  // description in types.js — the same one the flight model takes its gear and
+  // wing-strike points from, so what you see is what you fly.
+  const type = opts.type || getAircraft(DEFAULT_AIRCRAFT_ID);
+  const S = opts.shape || type.shape;
+  const livery = opts.livery || type.livery || '#eef1f5';
+  const accent = opts.accent || type.accent || '#c8102e';
+  const isJet = S.power.kind === 'jet';
+
   const root = new THREE.Group();
   root.name = 'aircraft';
 
@@ -170,7 +180,30 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     [0.34, 3.35],
     [0.18, 3.85],
     [0.05, 3.95],
-  ].map(([r, z]) => new THREE.Vector2(r, z));
+  ].map(([r, z]) => new THREE.Vector2(r * S.bodyRadius, z * S.bodyLength));
+  /**
+   * Fuselage radius at a station, straight off the same profile the body is
+   * lathed from. Anything that has to sit on the skin — windows, pylons —
+   * asks this rather than assuming the body is a tube of constant width.
+   */
+  const bodyRadiusAt = (z) => {
+    if (z <= profile[0].y) return profile[0].x;
+    for (let i = 1; i < profile.length; i++) {
+      if (z <= profile[i].y) {
+        const a = profile[i - 1];
+        const b = profile[i];
+        const t = (z - a.y) / (b.y - a.y || 1);
+        return lerp(a.x, b.x, t);
+      }
+    }
+    return profile[profile.length - 1].x;
+  };
+  /** Half-width of the body at this station and this height above the axis. */
+  const bodyHalfWidthAt = (z, y) => {
+    const r = bodyRadiusAt(z);
+    return Math.sqrt(Math.max(0.0001, r * r - y * y));
+  };
+
   const fuseGeo = new THREE.LatheGeometry(profile, 26);
   fuseGeo.rotateX(Math.PI / 2); // lathe axis Y → Z, nose toward -Z
   const fuselage = new THREE.Mesh(fuseGeo, bodyMat);
@@ -178,6 +211,8 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   root.add(fuselage);
 
   // Cabin roof blister so the greenhouse is not a bare tube.
+  // A fast jet has a bubble canopy instead, and an airliner a row of windows.
+  if (S.canopy === 'cabin') {
   const roof = new THREE.Mesh(
     new THREE.SphereGeometry(0.82, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.5),
     bodyMat
@@ -188,6 +223,7 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   roof.position.set(0, 0.28, 0.88);
   roof.castShadow = true;
   root.add(roof);
+  }
 
   // Windshield and side glass.
   const wsGeo = new THREE.SphereGeometry(0.86, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.46);
@@ -197,54 +233,117 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   windshield.rotation.x = -0.3;
   root.add(windshield);
 
-  for (const side of [-1, 1]) {
-    const w = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.62), glassMat);
-    w.position.set(side * 0.75, 0.28, -0.1);
-    w.rotation.y = side * Math.PI * 0.5;
-    root.add(w);
-    const w2 = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.5), glassMat);
-    w2.position.set(side * 0.7, 0.26, 0.95);
-    w2.rotation.y = side * Math.PI * 0.5;
-    root.add(w2);
+  if (S.canopy === 'cabin') {
+    for (const side of [-1, 1]) {
+      const w = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.62), glassMat);
+      w.position.set(side * 0.75, 0.28, -0.1);
+      w.rotation.y = side * Math.PI * 0.5;
+      root.add(w);
+      const w2 = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 0.5), glassMat);
+      w2.position.set(side * 0.7, 0.26, 0.95);
+      w2.rotation.y = side * Math.PI * 0.5;
+      root.add(w2);
+    }
+  } else if (S.canopy === 'bubble') {
+    // A single blown canopy over the pilot, faired into a spine behind.
+    const bubble = new THREE.Mesh(new THREE.SphereGeometry(0.62, 20, 14), glassMat);
+    bubble.scale.set(0.86, 0.78, 2.0);
+    bubble.position.set(0, 0.3, -0.5);
+    root.add(bubble);
+    const spine = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.34, 2.4), bodyMat);
+    spine.position.set(0, 0.28, 1.35);
+    spine.castShadow = true;
+    root.add(spine);
+  } else if (S.canopy === 'airliner') {
+    // Flight-deck glass, then a passenger window line down each side.
+    const fd = new THREE.Mesh(new THREE.SphereGeometry(0.72, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.42), glassMat);
+    fd.scale.set(0.95, 0.62, 1.05);
+    fd.position.set(0, 0.26, -1.72);
+    fd.rotation.x = -0.34;
+    root.add(fd);
+    // The cabin window line. It used to be a fixed distance out from the
+    // centreline, so from about the wing aft — where the body starts tapering
+    // into the tail cone — the windows hung in the air beside the aeroplane.
+    // Each one now sits on the skin at its own station, and the row stops
+    // where the cabin does.
+    const winMat = new THREE.MeshStandardMaterial({ color: 0x121a24, roughness: 0.2, metalness: 0.55 });
+    const rowGeo = new THREE.BoxGeometry(0.05, 0.16, 0.16);
+    const winY = 0.2 * S.bodyRadius;
+    const zFrom = -1.35 * S.bodyLength;
+    const zTo = 2.5 * S.bodyLength;
+    const pitch = 0.34;
+    const count = Math.max(4, Math.floor((zTo - zFrom) / pitch));
+    for (const side of [-1, 1]) {
+      const row = new THREE.InstancedMesh(rowGeo, winMat, count);
+      const d = new THREE.Object3D();
+      for (let i = 0; i < count; i++) {
+        const z = zFrom + i * pitch;
+        d.position.set(side * (bodyHalfWidthAt(z, winY) - 0.015), winY, z);
+        d.updateMatrix();
+        row.setMatrixAt(i, d.matrix);
+      }
+      row.instanceMatrix.needsUpdate = true;
+      root.add(row);
+    }
+    // A cabin door up front and another at the back, which is what makes the
+    // window line read as a cabin rather than a stripe.
+    for (const dz of [-1.5 * S.bodyLength, 2.2 * S.bodyLength]) {
+      for (const side of [-1, 1]) {
+        const door = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.62, 0.34), matteMat);
+        door.position.set(side * (bodyHalfWidthAt(dz, 0.06) - 0.012), 0.06, dz);
+        root.add(door);
+      }
+    }
   }
 
   // Engine cowling with a slightly different sheen, plus air intakes.
   // Slightly slimmer and lower than the fuselage line, so that from the cockpit
   // it sits below the horizon instead of hiding it.
-  const cowl = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.46, 0.9, 20), matteMat);
-  cowl.rotation.x = Math.PI / 2;
-  cowl.position.set(0, -0.06, -2.05);
-  cowl.castShadow = true;
-  root.add(cowl);
-  for (const side of [-1, 1]) {
-    const intake = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.16, 0.2), rubber);
-    intake.position.set(side * 0.3, -0.16, -2.46);
-    root.add(intake);
+  if (!isJet) {
+    const cowl = new THREE.Mesh(new THREE.CylinderGeometry(0.54, 0.46, 0.9, 20), matteMat);
+    cowl.rotation.x = Math.PI / 2;
+    cowl.position.set(0, -0.06, -2.05 * S.bodyLength);
+    cowl.castShadow = true;
+    root.add(cowl);
+    for (const side of [-1, 1]) {
+      const intake = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.16, 0.2), rubber);
+      intake.position.set(side * 0.3, -0.16, -2.46 * S.bodyLength);
+      root.add(intake);
+    }
   }
 
   /* ---------------- Wings ---------------- */
-  const wingProfile = aerofoil(16, 0.135, 0.025);
-  const wingSections = [
-    { y: 0.0, chord: 1.68, offsetX: 0, offsetY: 0 },
-    { y: 1.2, chord: 1.66, offsetX: 0.01, offsetY: 0.03 },
-    { y: 3.6, chord: 1.44, offsetX: 0.09, offsetY: 0.11 },
-    { y: 5.3, chord: 1.16, offsetX: 0.2, offsetY: 0.2 },
-    { y: 5.52, chord: 1.02, offsetX: 0.28, offsetY: 0.23 },
-  ];
+  // Thin, sharp sections for anything fast; thick and cambered for the ones
+  // that have to fly slowly.
+  const fast = S.sweep > 1.4;
+  const wingProfile = aerofoil(16, fast ? 0.075 : 0.135, fast ? 0.006 : 0.025);
+  const halfSpan = S.halfSpan;
+  // Chord, sweep and dihedral all interpolate from root to tip, so one set of
+  // knobs describes a straight strut-braced wing and a swept jet wing alike.
+  const stations = [0, 0.22, 0.62, 0.92, 1];
+  const wingSections = stations.map((f) => ({
+    y: f * halfSpan,
+    // Taper is gentle inboard and quicker outboard, like a real planform.
+    chord: lerp(S.rootChord, S.tipChord, Math.pow(f, 1.25)),
+    offsetX: S.sweep * Math.pow(f, 1.1),
+    offsetY: S.dihedral * f,
+  }));
+  const chordAt = (f) => lerp(S.rootChord, S.tipChord, Math.pow(f, 1.25));
+  const sweepAt = (f) => S.sweep * Math.pow(f, 1.1);
   const wingGeo = loft(wingSections, wingProfile);
 
   const wings = new THREE.Group();
   for (const side of [-1, 1]) {
     const w = new THREE.Mesh(wingGeo, bodyMat);
     w.scale.x = side;
-    w.position.set(side * 0.62, 0.72, -1.05);
+    w.position.set(side * S.wingRootX, S.wingY, S.wingZ);
     w.castShadow = w.receiveShadow = true;
     wings.add(w);
   }
   root.add(wings);
 
   // Wing struts (the classic high-wing braces).
-  for (const side of [-1, 1]) {
+  if (S.struts) for (const side of [-1, 1]) {
     for (const [ax, az, bx, bz] of [
       [side * 0.66, -0.42, side * 3.1, -0.75],
       [side * 0.66, -0.42, side * 3.0, 0.15],
@@ -272,66 +371,97 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     return pivot;
   }
 
-  surfaces.aileronL = hingedSurface(1.7, 0.42);
-  surfaces.aileronL.position.set(-4.35, 0.86, 0.32);
-  surfaces.aileronR = hingedSurface(1.7, 0.42);
-  surfaces.aileronR.position.set(4.35, 0.86, 0.32);
-  surfaces.flapL = hingedSurface(2.0, 0.44);
-  surfaces.flapL.position.set(-2.2, 0.83, 0.34);
-  surfaces.flapR = hingedSurface(2.0, 0.44);
-  surfaces.flapR.position.set(2.2, 0.83, 0.34);
+  // The moving surfaces ride on the wing's trailing edge, wherever the shape
+  // description happens to have put it.
+  const hinge = (f, chordFrac) => {
+    const c = chordAt(f) * chordFrac;
+    return {
+      x: S.wingRootX + f * halfSpan,
+      y: S.wingY + S.dihedral * f + 0.14,
+      z: S.wingZ + sweepAt(f) + chordAt(f) - c * 0.9,
+      chord: c,
+    };
+  };
+  const ailAt = hinge(0.78, 0.26);
+  const flapAt = hinge(0.4, 0.27);
+  const ailWidth = halfSpan * 0.32;
+  const flapWidth = halfSpan * 0.36;
+  surfaces.aileronL = hingedSurface(ailWidth, ailAt.chord);
+  surfaces.aileronL.position.set(-ailAt.x, ailAt.y, ailAt.z);
+  surfaces.aileronR = hingedSurface(ailWidth, ailAt.chord);
+  surfaces.aileronR.position.set(ailAt.x, ailAt.y, ailAt.z);
+  surfaces.flapL = hingedSurface(flapWidth, flapAt.chord);
+  surfaces.flapL.position.set(-flapAt.x, flapAt.y, flapAt.z);
+  surfaces.flapR = hingedSurface(flapWidth, flapAt.chord);
+  surfaces.flapR.position.set(flapAt.x, flapAt.y, flapAt.z);
   root.add(surfaces.aileronL, surfaces.aileronR, surfaces.flapL, surfaces.flapR);
 
   /* ---------------- Tail ---------------- */
   const tailProfile = aerofoil(12, 0.1, 0);
+  const hSweep = fast ? S.hRootChord * 0.7 : S.hRootChord * 0.16;
   const hStabGeo = loft(
     [
-      { y: 0, chord: 1.0, offsetX: 0 },
-      { y: 1.05, chord: 0.86, offsetX: 0.08 },
-      { y: 1.75, chord: 0.7, offsetX: 0.16 },
+      { y: 0, chord: S.hRootChord, offsetX: 0 },
+      { y: S.hSpan * 0.6, chord: S.hRootChord * 0.86, offsetX: hSweep * 0.6 },
+      { y: S.hSpan, chord: S.hRootChord * 0.7, offsetX: hSweep },
     ],
     tailProfile
   );
   for (const side of [-1, 1]) {
     const h = new THREE.Mesh(hStabGeo, bodyMat);
     h.scale.x = side;
-    h.position.set(side * 0.12, 0.14, 2.85);
+    h.position.set(side * 0.12, 0.14, S.hZ);
     h.castShadow = true;
     root.add(h);
   }
-  surfaces.elevator = hingedSurface(3.7, 0.42);
-  surfaces.elevator.position.set(0, 0.2, 3.72);
+  surfaces.elevator = hingedSurface(S.hSpan * 2.1, S.hRootChord * 0.42);
+  surfaces.elevator.position.set(0, 0.2, S.hZ + S.hRootChord * 0.82 + hSweep * 0.2);
   root.add(surfaces.elevator);
 
   const vStabGeo = loft(
     [
-      { y: 0, chord: 1.5, offsetX: 0 },
-      { y: 0.8, chord: 1.28, offsetX: 0.28 },
-      { y: 1.55, chord: 0.98, offsetX: 0.62 },
+      { y: 0, chord: S.finRootChord, offsetX: 0 },
+      { y: S.finHeight * 0.52, chord: S.finRootChord * 0.85, offsetX: S.finSweep * 0.45 },
+      { y: S.finHeight, chord: S.finRootChord * 0.62, offsetX: S.finSweep },
     ],
     tailProfile
   );
   const fin = new THREE.Mesh(vStabGeo, bodyMat);
   fin.rotation.z = Math.PI / 2; // span becomes vertical
-  fin.position.set(0, 0.18, 2.55);
+  fin.position.set(0, 0.18, S.finZ);
   fin.castShadow = true;
   root.add(fin);
   // Dorsal fillet.
-  const fillet = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.42, 1.1), bodyMat);
-  fillet.position.set(0, 0.42, 2.1);
+  const fillet = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.42, S.finRootChord * 0.73), bodyMat);
+  fillet.position.set(0, 0.42, S.finZ - S.finRootChord * 0.3);
   root.add(fillet);
 
   surfaces.rudder = (() => {
-    const g = new THREE.BoxGeometry(0.06, 1.32, 0.52);
-    g.translate(0, 0.66, 0.26);
+    const h = S.finHeight * 0.85;
+    const c = S.finRootChord * 0.35;
+    const g = new THREE.BoxGeometry(0.06, h, c);
+    g.translate(0, h / 2, c / 2);
     const m = new THREE.Mesh(g, matteMat);
     m.castShadow = true;
     const pivot = new THREE.Group();
     pivot.add(m);
-    pivot.position.set(0, 0.3, 3.35);
+    pivot.position.set(0, 0.3, S.finZ + S.finRootChord * 0.55 + S.finSweep * 0.35);
     return pivot;
   })();
   root.add(surfaces.rudder);
+
+  // An arrester hook, on the one that is meant to catch a wire.
+  if (S.hook) {
+    const hookArm = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 1.5, 8), strutMat);
+    hookArm.rotation.x = Math.PI / 2 - 0.42;
+    hookArm.position.set(0, -0.5, S.hZ + 0.5);
+    hookArm.castShadow = true;
+    root.add(hookArm);
+    const claw = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.05, 6, 12, Math.PI), strutMat);
+    claw.position.set(0, -1.05, S.hZ + 1.25);
+    claw.rotation.x = Math.PI / 2;
+    root.add(claw);
+  }
 
   /* ---------------- Landing gear ---------------- */
   function wheel(radius, width) {
@@ -355,13 +485,13 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   // SPEC.gearPoints says the ground contact is — nose (0, -1.42, -1.15) and
   // mains (±1.42, -1.50, 0.42). Otherwise the aeroplane looks like it is
   // hovering or buried.
-  const NOSE_R = 0.3 * 0.78 + 0.3 * 0.26; // tyre outer radius
-  const MAIN_R = 0.36 * 0.78 + 0.36 * 0.26;
+  const NOSE_R = S.wheelR.nose * (0.78 + 0.26); // tyre outer radius
+  const MAIN_R = S.wheelR.main * (0.78 + 0.26);
 
   // Nose gear: strut + wheel, steers with the rudder pedals.
   const noseLeg = new THREE.Group();
-  noseLeg.position.set(0, -0.42, -1.15);
-  const noseWheelY = -1.42 + NOSE_R - noseLeg.position.y; // local Y of the hub
+  noseLeg.position.set(0, -0.42, S.nose.z);
+  const noseWheelY = S.nose.y + NOSE_R - noseLeg.position.y; // local Y of the hub
   const noseStrut = new THREE.Mesh(
     new THREE.CylinderGeometry(0.075, 0.09, Math.abs(noseWheelY), 10),
     strutMat
@@ -371,7 +501,7 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   noseLeg.add(noseStrut);
   const noseSteer = new THREE.Group();
   noseSteer.position.y = noseWheelY;
-  const noseWheel = wheel(0.3, 0.16);
+  const noseWheel = wheel(S.wheelR.nose, 0.16);
   noseSteer.add(noseWheel);
   noseLeg.add(noseSteer);
   root.add(noseLeg);
@@ -382,31 +512,126 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   gear.mains = [];
   for (const side of [-1, 1]) {
     const legGroup = new THREE.Group();
-    legGroup.position.set(side * 0.55, -0.35, 0.42);
+    const legRootX = S.main.x * 0.39;
+    legGroup.position.set(side * legRootX, -0.35, S.main.z);
     // Hub position in the leg's local space.
-    const hubX = 1.42 - 0.55;
-    const hubY = -1.5 + MAIN_R - legGroup.position.y;
+    const hubX = S.main.x - legRootX;
+    const hubY = S.main.y + MAIN_R - legGroup.position.y;
     const legLen = Math.hypot(hubX, hubY);
     const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.11, legLen, 8), strutMat);
     leg.geometry.translate(0, -legLen / 2, 0);
     leg.rotation.z = side * Math.atan2(hubX, -hubY);
     leg.castShadow = true;
     legGroup.add(leg);
-    const w = wheel(0.36, 0.2);
+    const w = wheel(S.wheelR.main, 0.2);
     w.position.set(side * hubX, hubY, 0);
     legGroup.add(w);
-    const fairing = new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 8), matteMat);
-    fairing.scale.set(0.7, 0.7, 1.5);
-    fairing.position.copy(w.position);
-    legGroup.add(fairing);
+    // Spats belong on fixed gear. On a retractable they would be stowed with
+    // the leg, and drawn here they just look like the wheel is swollen.
+    if (!S.retractable) {
+      const fairing = new THREE.Mesh(new THREE.SphereGeometry(S.wheelR.main * 0.94, 12, 8), matteMat);
+      fairing.scale.set(0.7, 0.7, 1.5);
+      fairing.position.copy(w.position);
+      legGroup.add(fairing);
+    }
     root.add(legGroup);
     gear.mains.push({ group: legGroup, wheel: w, side });
     gear.legs.push(legGroup);
   }
 
-  /* ---------------- Propeller ---------------- */
+  /* ---------------- Powerplant ---------------- */
+  // Jets get nacelles and a nozzle that glows under power; propeller
+  // aeroplanes get a spinner, blades and a blur disc.
+  const nozzles = [];
+  if (isJet) {
+    const P = S.power;
+    const nacelleMat = metalMaterial(skin, { roughness: 0.3, metalness: 0.72 });
+    const hotMat = new THREE.MeshStandardMaterial({
+      color: 0x2a2320,
+      emissive: 0xff7020,
+      emissiveIntensity: 0,
+      roughness: 0.55,
+      metalness: 0.4,
+    });
+    const sides = P.count === 2 ? [-1, 1] : [0];
+    for (const side of sides) {
+      const g = new THREE.Group();
+      // Barrel, tapering slightly to the back.
+      const body = new THREE.Mesh(
+        new THREE.CylinderGeometry(P.radius, P.radius * 0.86, P.length * 2, 20, 1, true),
+        nacelleMat
+      );
+      body.rotation.x = Math.PI / 2;
+      body.castShadow = true;
+      g.add(body);
+      // Intake lip.
+      const lip = new THREE.Mesh(new THREE.TorusGeometry(P.radius, P.radius * 0.11, 8, 22), nacelleMat);
+      lip.position.z = -P.length;
+      g.add(lip);
+      // The dark throat, so the intake reads as a hole rather than a disc.
+      const throat = new THREE.Mesh(
+        new THREE.CircleGeometry(P.radius * 0.9, 20),
+        new THREE.MeshBasicMaterial({ color: 0x0a0c10 })
+      );
+      throat.position.z = -P.length + 0.16;
+      g.add(throat);
+      // Fan face, just visible inside.
+      const fan = new THREE.Mesh(
+        new THREE.CircleGeometry(P.radius * 0.85, 20),
+        new THREE.MeshStandardMaterial({ color: 0x8b939c, roughness: 0.3, metalness: 0.85 })
+      );
+      fan.position.z = -P.length + 0.2;
+      g.add(fan);
+      // Exhaust nozzle.
+      const nozzle = new THREE.Mesh(
+        new THREE.CylinderGeometry(P.radius * 0.78, P.radius * 0.6, P.length * 0.4, 18, 1, true),
+        hotMat
+      );
+      nozzle.rotation.x = Math.PI / 2;
+      nozzle.position.z = P.length * 1.1;
+      g.add(nozzle);
+      nozzles.push(nozzle.material);
+      if (P.count === 2) {
+        // Slung under the wing on a pylon that actually reaches it. The engine
+        // used to sit a quarter of a metre below the wing with a radius of
+        // more than twice that, so the top of the nacelle came up through the
+        // wing surface.
+        const f = (Math.abs(P.x) - S.wingRootX) / S.halfSpan;
+        const wingUnderside = S.wingY - 0.06;
+        const gap = wingUnderside - (P.y + P.radius);
+        const pylon = new THREE.Mesh(
+          new THREE.BoxGeometry(0.18, Math.max(0.12, gap + 0.2), P.length * 0.9),
+          bodyMat
+        );
+        pylon.position.set(0, P.radius + Math.max(0.12, gap + 0.2) / 2 - 0.06, P.length * 0.35);
+        pylon.castShadow = true;
+        g.add(pylon);
+      }
+      g.position.set(side * (P.x || 0), P.y, P.z);
+      root.add(g);
+    }
+    if (P.afterburner) {
+      // A flame that only appears at high power.
+      const flame = new THREE.Mesh(
+        new THREE.ConeGeometry(P.radius * 0.55, P.length * 2.4, 14, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: 0xffa64d,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        })
+      );
+      flame.rotation.x = -Math.PI / 2;
+      flame.position.set(0, P.y, P.z + P.length * 2.3);
+      root.add(flame);
+      nozzles.afterburner = flame;
+    }
+  }
+
   const propGroup = new THREE.Group();
-  propGroup.position.set(0, 0.02, -2.6);
+  propGroup.visible = !isJet;
+  propGroup.position.set(0, 0.02, S.power.z);
   const spinner = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.55, 16), metalMaterial(skin, { roughness: 0.2, metalness: 0.7 }));
   spinner.rotation.x = -Math.PI / 2;
   spinner.position.z = -0.2;
@@ -420,8 +645,9 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     // 2.1 m propeller — right for an aeroplane this size). It used to reach
     // 1.85 m, which from the cockpit looked like a grey plank laid across the
     // windscreen and stuck out well past the disc from outside.
-    const bl = new THREE.Mesh(new THREE.BoxGeometry(0.13, 1.0, 0.045), bladeMat);
-    bl.geometry.translate(0, 0.52, 0);
+    const bladeLen = S.power.propRadius * 0.95;
+    const bl = new THREE.Mesh(new THREE.BoxGeometry(0.13, bladeLen, 0.045), bladeMat);
+    bl.geometry.translate(0, bladeLen / 2 + 0.02, 0);
     bl.rotation.z = i * Math.PI;
     bl.rotation.y = 0.34 * (i === 0 ? 1 : -1);
     bl.castShadow = true;
@@ -430,7 +656,7 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   propGroup.add(blades);
 
   const disc = new THREE.Mesh(
-    new THREE.PlaneGeometry(2.1, 2.1),
+    new THREE.PlaneGeometry(S.power.propRadius * 2, S.power.propRadius * 2),
     new THREE.MeshBasicMaterial({
       map: propBlurTexture(),
       transparent: true,
@@ -445,18 +671,22 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
 
   /* ---------------- Lights ---------------- */
   const lights = {};
+  // On the wing tips, wherever this aeroplane's wing tips happen to be.
+  const tipX = S.wingRootX + S.halfSpan;
+  const tipY = S.wingY + S.dihedral + 0.16;
+  const tipZ = S.wingZ + S.sweep + S.tipChord * 0.35;
   lights.navLeft = glowSprite(0xff2020, 0.42);
-  lights.navLeft.position.set(-5.52, 0.88, -0.6);
+  lights.navLeft.position.set(-tipX, tipY, tipZ);
   lights.navRight = glowSprite(0x20ff40, 0.42);
-  lights.navRight.position.set(5.52, 0.88, -0.6);
+  lights.navRight.position.set(tipX, tipY, tipZ);
   lights.tail = glowSprite(0xffffff, 0.3);
-  lights.tail.position.set(0, 0.28, 3.95);
+  lights.tail.position.set(0, 0.28, 3.95 * S.bodyLength);
   lights.strobeL = glowSprite(0xffffff, 0.8);
-  lights.strobeL.position.set(-5.5, 0.9, -0.5);
+  lights.strobeL.position.set(-tipX, tipY, tipZ + 0.1);
   lights.strobeR = glowSprite(0xffffff, 0.8);
-  lights.strobeR.position.set(5.5, 0.9, -0.5);
+  lights.strobeR.position.set(tipX, tipY, tipZ + 0.1);
   lights.landing = glowSprite(0xfff0c0, 0.75);
-  lights.landing.position.set(-1.7, 0.66, -1.5);
+  lights.landing.position.set(-tipX * 0.32, S.wingY - 0.06, S.wingZ - 0.45);
   for (const k in lights) root.add(lights[k]);
   // Base sizes, so the day/night scaling below has something to scale from.
   for (const k in lights) lights[k].userData.baseScale = lights[k].scale.x;
@@ -472,7 +702,7 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
 
   /* ---------------- Cabin interior (seen through the glass) ---------- */
   const seatMat = new THREE.MeshStandardMaterial({ map: leatherTexture('#2b2119'), roughness: 0.8 });
-  for (const side of [-1, 1]) {
+  if (S.canopy === 'cabin') for (const side of [-1, 1]) {
     const seat = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.1, 0.44), seatMat);
     seat.position.set(side * 0.3, -0.22, 0.1);
     root.add(seat);
@@ -493,6 +723,10 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     blades,
     propGroup,
     glassMat,
+    nozzles,
+    isJet,
+    type,
+    shape: S,
   };
 
   /**
@@ -506,13 +740,28 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     // glowing blobs stuck to the wings on a sunny afternoon.
     const dark = weather ? (weather.isNight ? 1 : weather.cond.cloud > 0.75 ? 0.55 : 0.18) : 0.5;
 
-    // Propeller: spin, and fade in the blur disc as it speeds up.
-    const rpmHz = ac.rpm * 42;
-    state.propAngle += rpmHz * dt * Math.PI * 2;
-    state.blades.rotation.z = state.propAngle;
-    const blur = clamp((ac.rpm - 0.22) / 0.45, 0, 1);
-    state.disc.material.opacity = blur * 0.5;
-    state.blades.visible = blur < 0.98;
+    if (state.isJet) {
+      // Jets: the nozzle heats up with power, and the afterburner lights at
+      // the top of the range.
+      const heat = clamp((ac.rpm - 0.35) / 0.65, 0, 1);
+      for (const m of state.nozzles) m.emissiveIntensity = heat * 2.4;
+      const ab = state.nozzles.afterburner;
+      if (ab) {
+        const lit = clamp((ac.rpm - 0.86) / 0.14, 0, 1);
+        ab.material.opacity = lit * 0.75;
+        ab.visible = lit > 0.01;
+        // Flicker, so it does not look like a painted cone.
+        ab.scale.set(1, 0.85 + Math.sin(state.strobeT * 47) * 0.12 + lit * 0.3, 1);
+      }
+    } else {
+      // Propeller: spin, and fade in the blur disc as it speeds up.
+      const rpmHz = ac.rpm * 42;
+      state.propAngle += rpmHz * dt * Math.PI * 2;
+      state.blades.rotation.z = state.propAngle;
+      const blur = clamp((ac.rpm - 0.22) / 0.45, 0, 1);
+      state.disc.material.opacity = blur * 0.5;
+      state.blades.visible = blur < 0.98;
+    }
 
     // Control surfaces.
     const s = state.surfaces;
@@ -536,7 +785,7 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
     }
     // Wheels spin while rolling.
     if (ac.onGround) {
-      state.wheelAngle += (ac.groundSpeed / 0.36) * dt;
+      state.wheelAngle += (ac.groundSpeed / state.shape.wheelR.main) * dt;
       state.gear.nose.wheel.rotation.x = state.wheelAngle;
       for (const m of state.gear.mains) m.wheel.rotation.x = state.wheelAngle;
     }
@@ -564,5 +813,9 @@ export function createAircraftModel({ livery = '#eef1f5', accent = '#c8102e' } =
   };
 
   root.userData.parts = state;
+  // Built at trainer scale throughout, then sized. The flight model's contact
+  // points are scaled by exactly the same number in types.js, so the wheels
+  // touch the ground where they appear to.
+  root.scale.setScalar(S.scale);
   return root;
 }

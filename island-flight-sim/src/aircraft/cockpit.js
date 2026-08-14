@@ -19,25 +19,89 @@ const FACE = '#0e1013';
 const TEXT = '#e8eaee';
 const DIM = '#9aa0a8';
 
+/**
+ * A milled aluminium bezel.
+ *
+ * Three passes, which is what makes it read as metal rather than a grey circle:
+ * a lit rim (light from the top left, the direction the cabin light comes
+ * from), a chamfer that catches that light along its upper edge and falls into
+ * shadow along its lower one, and a contact shadow underneath so the
+ * instrument sits *in* the panel instead of on top of a picture of one.
+ */
 function ring(ctx, x, y, r) {
-  // Metal bezel with a highlight, then the dark instrument face.
-  const g = ctx.createLinearGradient(x - r, y - r, x + r, y + r);
-  g.addColorStop(0, '#6a7078');
-  g.addColorStop(0.45, '#3b4046');
-  g.addColorStop(1, '#22262b');
+  // Contact shadow first, offset down — the instrument is proud of the panel.
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.55)';
+  ctx.shadowBlur = 16;
+  ctx.shadowOffsetY = 7;
+  ctx.fillStyle = '#2a2e34';
+  ctx.beginPath();
+  ctx.arc(x, y, r + 11, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // The bezel ring, lit from the top left.
+  const g = ctx.createLinearGradient(x - r, y - r, x + r * 0.7, y + r);
+  g.addColorStop(0, '#878d96');
+  g.addColorStop(0.3, '#5b6169');
+  g.addColorStop(0.62, '#3a3f46');
+  g.addColorStop(1, '#20242a');
   ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.arc(x, y, r + 9, 0, Math.PI * 2);
+  ctx.arc(x, y, r + 11, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = FACE;
+
+  // Chamfer: a bright arc across the top, a dark one across the bottom.
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+  ctx.beginPath();
+  ctx.arc(x, y, r + 9.5, Math.PI * 1.08, Math.PI * 1.92);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.arc(x, y, r + 9.5, Math.PI * 0.08, Math.PI * 0.92);
+  ctx.stroke();
+
+  // Four bezel screws, at the corners like the real thing.
+  ctx.fillStyle = '#9aa1aa';
+  for (const a of [0.78, 2.36, 3.93, 5.5]) {
+    ctx.beginPath();
+    ctx.arc(x + Math.cos(a) * (r + 6), y + Math.sin(a) * (r + 6), 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // The dial face, very slightly domed by a radial gradient.
+  const f = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r);
+  f.addColorStop(0, '#171a1f');
+  f.addColorStop(1, '#0a0c0f');
+  ctx.fillStyle = f;
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-  ctx.lineWidth = 2;
+  // Inner shadow where the glass meets the dial.
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.arc(x, y, r - 1, Math.PI * 1.05, Math.PI * 1.75);
+  ctx.arc(x, y, r - 2, 0, Math.PI * 2);
   ctx.stroke();
+}
+
+/**
+ * The reflection in the instrument glass. Drawn last, over the needles, so it
+ * sits where glass actually is. Kept faint — a real dial you can still read.
+ */
+function glassOver(ctx, x, y, r) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.clip();
+  const g = ctx.createLinearGradient(x - r, y - r, x + r * 0.4, y + r * 0.8);
+  g.addColorStop(0, 'rgba(255,255,255,0.13)');
+  g.addColorStop(0.42, 'rgba(255,255,255,0.03)');
+  g.addColorStop(0.43, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  ctx.restore();
 }
 
 function label(ctx, x, y, text, size = 15, color = DIM, align = 'center') {
@@ -82,9 +146,27 @@ const GAUGE = {
   fuel: { x: 930, y: 218, r: 92 },
 };
 
+/** Where the two screens sit on the glass panel, in canvas pixels. */
+const GLASS = {
+  pfd: { x: 70, y: 70, w: 940, h: 640 },
+  eng: { x: 1080, y: 70, w: 222, h: 640 },
+};
+
 export class InstrumentPanel {
-  constructor(highContrast = false) {
+  /**
+   * @param {boolean} highContrast
+   * @param {'classic'|'glass'} layout  round dials, or screens
+   *
+   * A 1970s six-pack in a fly-by-wire fighter was the last thing in here that
+   * still looked like a placeholder. Jets and the airliner get a primary
+   * flight display: speed and altitude as moving tapes either side of an
+   * attitude ball, heading along the bottom, engine and fuel down the side —
+   * the same numbers, arranged the way the aeroplane that has them arranges
+   * them.
+   */
+  constructor(highContrast = false, layout = 'classic') {
     this.highContrast = highContrast;
+    this.layout = layout;
     this.staticLayer = document.createElement('canvas');
     this.staticLayer.width = CW;
     this.staticLayer.height = CH;
@@ -96,29 +178,509 @@ export class InstrumentPanel {
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.anisotropy = 8;
     this.acc = 0;
-    this.drawStatic();
+    if (this.layout === 'glass') this.drawStaticGlass();
+    else this.drawStatic();
     // Smoothed instrument values — real needles have inertia.
     this.smooth = { ias: 0, alt: 0, vs: 0, hdg: 90, rpm: 0, pitch: 0, bank: 0, slip: 0, fuel: 1 };
   }
 
-  drawStatic() {
+  /**
+   * The panel itself, under the instruments: a wrinkle-finish casting with a
+   * pool of light spilling down from the glareshield and the corners falling
+   * away into shadow. The old panel was a flat grey rectangle with a vertical
+   * gradient, which is why every instrument looked stuck to a wall.
+   */
+  drawPanelBase(ctx) {
+    ctx.fillStyle = '#1c2025';
+    ctx.fillRect(0, 0, CW, CH);
+
+    // Wrinkle paint: fine speckle, the texture every light-aircraft panel has.
+    let seed = 20240611;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < 9000; i++) {
+      const x = rnd() * CW;
+      const y = rnd() * CH;
+      const v = rnd();
+      ctx.fillStyle = v > 0.5 ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.07)';
+      ctx.fillRect(x, y, 1 + rnd() * 2, 1 + rnd() * 2);
+    }
+
+    // Light from the glareshield: brightest across the top, dying out below.
+    const lit = ctx.createRadialGradient(CW * 0.42, -140, 80, CW * 0.42, 250, CH * 1.35);
+    lit.addColorStop(0, 'rgba(255,244,220,0.16)');
+    lit.addColorStop(0.45, 'rgba(255,240,215,0.04)');
+    lit.addColorStop(1, 'rgba(0,0,0,0.34)');
+    ctx.fillStyle = lit;
+    ctx.fillRect(0, 0, CW, CH);
+
+    // Corner vignette, so the panel edges recede into the cabin.
+    const vig = ctx.createRadialGradient(CW / 2, CH / 2, CH * 0.3, CW / 2, CH / 2, CH * 1.05);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.45)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, CW, CH);
+
+    // A raised sub-panel behind the flight instruments, as a real six-pack has.
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 22;
+    ctx.shadowOffsetY = 6;
+    ctx.fillStyle = 'rgba(255,255,255,0.030)';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(56, 76, 1010, 560, 22) : ctx.rect(56, 76, 1010, 560);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(56, 76, 1010, 560, 22) : ctx.rect(56, 76, 1010, 560);
+    ctx.stroke();
+
+    // Panel fasteners around its edge.
+    ctx.fillStyle = '#5c636c';
+    for (let i = 0; i <= 6; i++) {
+      const x = 56 + (1010 * i) / 6;
+      for (const y of [76, 636]) {
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(x - 3.5, y - 0.8, 7, 1.6);
+        ctx.fillStyle = '#5c636c';
+      }
+    }
+  }
+
+  /* ================================================================== *
+   * Glass cockpit
+   *
+   * The same numbers as the round dials, arranged the way an aeroplane
+   * that has screens arranges them: speed on a tape down the left,
+   * altitude on a tape down the right, the attitude ball between them,
+   * heading along the bottom, and the engine down the side.
+   *
+   * The reason a tape beats a dial here is not fashion. A needle tells you
+   * a value; a tape tells you a value *and* what is coming — you can see
+   * the numbers you are about to reach sliding towards the pointer, which
+   * is what you actually want at 300 knots.
+   * ================================================================== */
+
+  /** Frames, bezels and lettering — painted once. */
+  drawStaticGlass() {
     const ctx = this.staticLayer.getContext('2d');
-    // Panel base.
-    ctx.fillStyle = '#1b1e22';
-    ctx.fillRect(0, 0, CW, CH);
-    const grad = ctx.createLinearGradient(0, 0, 0, CH);
-    grad.addColorStop(0, 'rgba(255,255,255,0.05)');
-    grad.addColorStop(0.35, 'rgba(0,0,0,0.12)');
-    grad.addColorStop(1, 'rgba(0,0,0,0.35)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, CW, CH);
-    // Screw heads at the corners of the instrument cluster.
-    ctx.fillStyle = '#43484f';
-    for (const [sx, sy] of [[60, 60], [CW - 60, 60], [60, CH - 60], [CW - 60, CH - 60]]) {
+    this.drawPanelBase(ctx);
+
+    const G = GLASS;
+    // The screens themselves: near-black glass, slightly proud of the panel.
+    const screen = (x, y, w, h) => {
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.6)';
+      ctx.shadowBlur = 18;
+      ctx.shadowOffsetY = 6;
+      ctx.fillStyle = '#2b3036';
       ctx.beginPath();
-      ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+      ctx.roundRect ? ctx.roundRect(x - 9, y - 9, w + 18, h + 18, 12) : ctx.rect(x - 9, y - 9, w + 18, h + 18);
+      ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = '#05070a';
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(x, y, w, h, 6) : ctx.rect(x, y, w, h);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    };
+    screen(G.pfd.x, G.pfd.y, G.pfd.w, G.pfd.h);
+    screen(G.eng.x, G.eng.y, G.eng.w, G.eng.h);
+
+    // Engine display headings, which never change.
+    label(ctx, G.eng.x + G.eng.w / 2, G.eng.y + 26, 'ENGINE', 13, DIM);
+    label(ctx, G.eng.x + 52, G.eng.y + 74, 'N1 %', 12, DIM);
+    label(ctx, G.eng.x + 168, G.eng.y + 74, 'FUEL', 12, DIM);
+    label(ctx, G.eng.x + G.eng.w / 2, G.eng.y + G.eng.h - 128, 'FLAPS', 12, DIM);
+    label(ctx, G.eng.x + G.eng.w / 2, G.eng.y + G.eng.h - 62, 'GEAR', 12, DIM);
+  }
+
+  /** The live PFD. Called at ~30 Hz. */
+  renderGlass(ac, weather) {
+    const ctx = this.ctx;
+    const r = ac.readouts();
+    const s = this.smooth;
+    const k = 0.3;
+    s.ias = lerp(s.ias, r.iasKts, k);
+    s.alt = lerp(s.alt, r.altFt, k);
+    s.vs = lerp(s.vs, r.vsFpm, 0.18);
+    let dh = ((r.heading - s.hdg + 540) % 360) - 180;
+    s.hdg = (s.hdg + dh * k + 360) % 360;
+    s.rpm = lerp(s.rpm, r.rpm, k);
+    s.pitch = lerp(s.pitch, r.pitch, 0.35);
+    s.bank = lerp(s.bank, r.bank, 0.35);
+    s.slip = lerp(s.slip, r.slip, 0.2);
+    s.fuel = lerp(s.fuel, r.fuelPct, 0.1);
+
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.drawImage(this.staticLayer, 0, 0);
+
+    const G = GLASS;
+    const P = G.pfd;
+    const cx = P.x + P.w / 2;
+    const cy = P.y + P.h / 2 - 20;
+
+    /* ---- Attitude: sky, ground, pitch ladder, bank pointer ---- */
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(P.x + 150, P.y + 4, P.w - 300, P.h - 100);
+    ctx.clip();
+    ctx.translate(cx, cy);
+    ctx.rotate((-s.bank * Math.PI) / 180);
+    const pxPerDeg = 6.2;
+    const off = s.pitch * pxPerDeg;
+    const sky = ctx.createLinearGradient(0, -P.h, 0, off);
+    sky.addColorStop(0, '#0f4d86');
+    sky.addColorStop(1, '#4aa3dd');
+    ctx.fillStyle = sky;
+    ctx.fillRect(-P.w, -P.h * 1.5 + off, P.w * 2, P.h * 1.5);
+    const grd = ctx.createLinearGradient(0, off, 0, P.h);
+    grd.addColorStop(0, '#8a5f30');
+    grd.addColorStop(1, '#4a3218');
+    ctx.fillStyle = grd;
+    ctx.fillRect(-P.w, off, P.w * 2, P.h * 1.5);
+    // Horizon.
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-P.w, off);
+    ctx.lineTo(P.w, off);
+    ctx.stroke();
+    // Pitch ladder.
+    ctx.lineWidth = 2;
+    ctx.font = '600 15px "Helvetica Neue", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let d = -30; d <= 30; d += 5) {
+      if (d === 0) continue;
+      const yy = off - d * pxPerDeg;
+      const w = d % 10 === 0 ? 62 : 30;
+      ctx.strokeStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(-w, yy);
+      ctx.lineTo(w, yy);
+      ctx.stroke();
+      if (d % 10 === 0) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(String(Math.abs(d)), -w - 20, yy);
+        ctx.fillText(String(Math.abs(d)), w + 20, yy);
+      }
+    }
+    ctx.restore();
+
+    /* ---- Bank scale and the fixed aircraft symbol ---- */
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.5;
+    const bankR = 168;
+    for (const d of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) {
+      const a = (d * Math.PI) / 180;
+      const len = d === 0 ? 18 : d % 30 === 0 ? 14 : 8;
+      ctx.beginPath();
+      ctx.moveTo(Math.sin(a) * bankR, -Math.cos(a) * bankR);
+      ctx.lineTo(Math.sin(a) * (bankR - len), -Math.cos(a) * (bankR - len));
+      ctx.stroke();
+    }
+    const ba = (-s.bank * Math.PI) / 180;
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath();
+    ctx.moveTo(Math.sin(ba) * (bankR - 20), -Math.cos(ba) * (bankR - 20));
+    ctx.lineTo(Math.sin(ba) * (bankR - 20) - 10, -Math.cos(ba) * (bankR - 20) + 17);
+    ctx.lineTo(Math.sin(ba) * (bankR - 20) + 10, -Math.cos(ba) * (bankR - 20) + 17);
+    ctx.closePath();
+    ctx.fill();
+    // Slip: the little trapezoid under the bank pointer slides with the ball.
+    ctx.fillStyle = '#ffffff';
+    const slipX = clamp(s.slip, -1, 1) * 26;
+    ctx.fillRect(Math.sin(ba) * (bankR - 20) - 11 + slipX, -Math.cos(ba) * (bankR - 20) + 20, 22, 6);
+    // Aircraft symbol.
+    ctx.strokeStyle = '#ffd23f';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(-88, 0);
+    ctx.lineTo(-34, 0);
+    ctx.lineTo(-34, 16);
+    ctx.moveTo(88, 0);
+    ctx.lineTo(34, 0);
+    ctx.lineTo(34, 16);
+    ctx.stroke();
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(-5, -5, 10, 10);
+    ctx.restore();
+
+    /* ---- Speed tape ---- */
+    this.tape(ctx, {
+      x: P.x + 16,
+      y: P.y + 20,
+      w: 118,
+      h: P.h - 140,
+      value: s.ias,
+      step: 10,
+      pxPerUnit: 5.2,
+      decimals: 0,
+      label: 'KIAS',
+      // Colour bands: green normal, amber caution, red at the limit.
+      bands: [
+        [0, 48, '#e8402a'],
+        [48, 55, '#f2c53d'],
+        [55, 130, '#3ec96a'],
+        [130, 160, '#f2c53d'],
+        [160, 400, '#e8402a'],
+      ],
+      align: 'right',
+    });
+
+    /* ---- Altitude tape ---- */
+    this.tape(ctx, {
+      x: P.x + P.w - 134,
+      y: P.y + 20,
+      w: 118,
+      h: P.h - 140,
+      value: s.alt,
+      step: 100,
+      pxPerUnit: 0.42,
+      decimals: 0,
+      label: 'FEET',
+      align: 'left',
+    });
+
+    /* ---- Vertical speed, as a bar beside the altitude tape ---- */
+    {
+      const vx = P.x + P.w - 8;
+      const vy = P.y + 20;
+      const vh = P.h - 140;
+      const mid = vy + vh / 2;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillRect(vx, vy, 4, vh);
+      const v = clamp(s.vs, -2000, 2000);
+      const len = (v / 2000) * (vh / 2 - 8);
+      ctx.fillStyle = Math.abs(v) > 1500 ? '#f2c53d' : '#3ec96a';
+      ctx.fillRect(vx, mid - Math.max(0, len), 4, Math.abs(len));
+      label(ctx, vx + 2, vy - 8, 'VS', 10, DIM);
+    }
+
+    /* ---- Heading strip along the bottom ---- */
+    {
+      const hx = P.x + 150;
+      const hw = P.w - 300;
+      const hy = P.y + P.h - 74;
+      ctx.fillStyle = 'rgba(4,7,11,0.9)';
+      ctx.fillRect(hx, hy, hw, 46);
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(hx, hy, hw, 46);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(hx, hy, hw, 46);
+      ctx.clip();
+      const pxPerDegH = 4.6;
+      const centre = hx + hw / 2;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let d = -60; d <= 60; d += 5) {
+        const deg = (Math.round(s.hdg / 5) * 5 + d + 720) % 360;
+        const px = centre + (d - (s.hdg - Math.round(s.hdg / 5) * 5)) * pxPerDegH;
+        const major = deg % 10 === 0;
+        ctx.strokeStyle = '#c9ced6';
+        ctx.lineWidth = major ? 2 : 1;
+        ctx.beginPath();
+        ctx.moveTo(px, hy + 46);
+        ctx.lineTo(px, hy + 46 - (major ? 12 : 7));
+        ctx.stroke();
+        if (deg % 30 === 0) {
+          ctx.fillStyle = '#e8eaee';
+          ctx.font = '700 16px "Helvetica Neue", Arial, sans-serif';
+          const t = deg === 0 ? 'N' : deg === 90 ? 'E' : deg === 180 ? 'S' : deg === 270 ? 'W' : String(deg / 10);
+          ctx.fillText(t, px, hy + 18);
+        }
+      }
+      ctx.restore();
+      // The bug: current heading in a box in the middle.
+      ctx.fillStyle = '#0b0e12';
+      ctx.fillRect(centre - 42, hy - 26, 84, 28);
+      ctx.strokeStyle = '#8fa2b4';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(centre - 42, hy - 26, 84, 28);
+      ctx.fillStyle = '#e8eaee';
+      ctx.font = '700 20px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(Math.round(s.hdg)).padStart(3, '0'), centre, hy - 11);
+      ctx.fillStyle = '#ffd23f';
+      ctx.beginPath();
+      ctx.moveTo(centre, hy + 2);
+      ctx.lineTo(centre - 8, hy - 8);
+      ctx.lineTo(centre + 8, hy - 8);
+      ctx.closePath();
       ctx.fill();
     }
+
+    /* ---- Engine strip ---- */
+    {
+      const E = GLASS.eng;
+      // N1 and fuel as vertical bars.
+      const bar = (bx, by, bh, frac, colour, text) => {
+        ctx.fillStyle = '#0b0e12';
+        ctx.fillRect(bx, by, 46, bh);
+        ctx.fillStyle = colour;
+        const fh = bh * clamp(frac, 0, 1);
+        ctx.fillRect(bx + 3, by + bh - fh + 3 > by + bh ? by + bh : by + (bh - fh), 40, Math.max(0, fh - 3));
+        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx, by, 46, bh);
+        ctx.fillStyle = '#e8eaee';
+        ctx.font = '700 17px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, bx + 23, by + bh + 20);
+      };
+      const bh = 200;
+      bar(E.x + 30, E.y + 92, bh, s.rpm, s.rpm > 0.93 ? '#f2c53d' : '#3ec96a', `${Math.round(s.rpm * 100)}`);
+      bar(
+        E.x + 146,
+        E.y + 92,
+        bh,
+        s.fuel,
+        s.fuel < 0.15 ? '#ff5a3c' : '#3ec96a',
+        `${Math.round(r.fuelL)}L`
+      );
+
+      // Flap and gear position.
+      const strip = (sy, frac, colour, text) => {
+        ctx.fillStyle = '#0b0e12';
+        ctx.fillRect(E.x + 30, sy, 162, 24);
+        ctx.fillStyle = colour;
+        ctx.fillRect(E.x + 32, sy + 2, 158 * clamp(frac, 0, 1), 20);
+        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(E.x + 30, sy, 162, 24);
+        ctx.fillStyle = '#e8eaee';
+        ctx.font = '700 13px "Helvetica Neue", Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(text, E.x + 111, sy + 12);
+      };
+      strip(E.y + E.h - 112, ac.flaps || 0, '#4a9fe0', `${Math.round((ac.flaps || 0) * 30)}°`);
+      strip(
+        E.y + E.h - 46,
+        r.gearPos,
+        r.gearPos > 0.95 ? '#3ec96a' : '#ffb020',
+        r.gearPos > 0.95 ? 'DOWN' : r.gearPos < 0.05 ? 'UP' : 'MOVING'
+      );
+
+      // Warnings, in words, top of the engine screen.
+      const warn = r.stalled
+        ? ['STALL', '#ff3b30']
+        : !r.engineOn
+          ? ['ENGINE OUT', '#ff3b30']
+          : r.fuelPct < 0.15
+            ? ['LOW FUEL', '#ff3b30']
+            : null;
+      if (warn) {
+        ctx.fillStyle = warn[1];
+        ctx.fillRect(E.x + 20, E.y + 36, E.w - 40, 30);
+        ctx.fillStyle = '#101216';
+        ctx.font = '800 18px "Helvetica Neue", Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(warn[0], E.x + E.w / 2, E.y + 51);
+      }
+    }
+
+    this.texture.needsUpdate = true;
+  }
+
+  /**
+   * A moving-tape instrument: numbers slide past a fixed pointer.
+   * Used for both speed and altitude, which differ only in their scale.
+   */
+  tape(ctx, o) {
+    const { x, y, w, h, value, step, pxPerUnit, label: lab, bands, align } = o;
+    const mid = y + h / 2;
+    ctx.save();
+    ctx.fillStyle = 'rgba(4,7,11,0.86)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, w, h);
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+
+    // Colour bands down the edge, if this tape has them.
+    if (bands) {
+      const bx = align === 'right' ? x + w - 7 : x;
+      for (const [lo, hi, col] of bands) {
+        const yLo = mid + (value - lo) * pxPerUnit;
+        const yHi = mid + (value - hi) * pxPerUnit;
+        ctx.fillStyle = col;
+        ctx.fillRect(bx, Math.min(yLo, yHi), 7, Math.abs(yLo - yHi));
+      }
+    }
+
+    // Ticks and numbers.
+    const first = Math.floor((value - h / 2 / pxPerUnit) / step) * step;
+    const last = Math.ceil((value + h / 2 / pxPerUnit) / step) * step;
+    ctx.textBaseline = 'middle';
+    for (let v = first; v <= last; v += step) {
+      if (v < 0) continue;
+      const ty = mid + (value - v) * pxPerUnit;
+      ctx.strokeStyle = '#c9ced6';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (align === 'right') {
+        ctx.moveTo(x + w - 10, ty);
+        ctx.lineTo(x + w - 24, ty);
+      } else {
+        ctx.moveTo(x + 10, ty);
+        ctx.lineTo(x + 24, ty);
+      }
+      ctx.stroke();
+      ctx.fillStyle = '#e8eaee';
+      ctx.font = '600 19px "Helvetica Neue", Arial, sans-serif';
+      ctx.textAlign = align === 'right' ? 'right' : 'left';
+      ctx.fillText(String(Math.round(v)), align === 'right' ? x + w - 30 : x + 30, ty);
+    }
+    ctx.restore();
+
+    // The pointer box, drawn over the tape so the current value is unmissable.
+    ctx.fillStyle = '#0b0e12';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (align === 'right') {
+      ctx.moveTo(x - 2, mid - 20);
+      ctx.lineTo(x + w - 16, mid - 20);
+      ctx.lineTo(x + w - 2, mid);
+      ctx.lineTo(x + w - 16, mid + 20);
+      ctx.lineTo(x - 2, mid + 20);
+    } else {
+      ctx.moveTo(x + 2, mid);
+      ctx.lineTo(x + 16, mid - 20);
+      ctx.lineTo(x + w + 2, mid - 20);
+      ctx.lineTo(x + w + 2, mid + 20);
+      ctx.lineTo(x + 16, mid + 20);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 26px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(Math.max(0, Math.round(value))), x + w / 2 - 4, mid);
+    label(ctx, x + w / 2, y + h + 22, lab, 13, DIM);
+  }
+
+  drawStatic() {
+    const ctx = this.staticLayer.getContext('2d');
+    this.drawPanelBase(ctx);
 
     /* ---- Airspeed indicator: 40–170 kt over 300° ---- */
     {
@@ -662,6 +1224,9 @@ export class InstrumentPanel {
       bar(x0 + 420, 70, r.gearPos, r.gearPos > 0.95 ? '#3ec96a' : '#ffb020');
     }
 
+    // Glass last, over the needles — that is where the glass is.
+    for (const k in GAUGE) glassOver(ctx, GAUGE[k].x, GAUGE[k].y, GAUGE[k].r);
+
     this.texture.needsUpdate = true;
   }
 
@@ -669,7 +1234,8 @@ export class InstrumentPanel {
     this.acc += dt;
     if (this.acc >= 1 / 30) {
       this.acc = 0;
-      this.render(ac, weather);
+      if (this.layout === 'glass') this.renderGlass(ac, weather);
+      else this.render(ac, weather);
     }
   }
 }
@@ -678,7 +1244,28 @@ export class InstrumentPanel {
  * Build the physical cockpit: panel shell, glareshield, yoke, throttle lever,
  * door frames, seats and the rain-streaked windshield overlay.
  */
-export function createCockpit({ highContrast = false } = {}) {
+/**
+ * Per-aeroplane cockpit dressing.
+ *
+ * The instruments themselves are shared — an altimeter is an altimeter — but
+ * what you hold and what the cabin is made of is not. A fast jet has a stick
+ * between your knees and one thrust lever per engine; a light single has a
+ * yoke and three knobs; an airliner has a wide, dark flight deck.
+ */
+const COCKPIT_STYLES = {
+  // `panel` picks the instruments: round dials for the light aeroplanes,
+  // screens for anything with a jet engine. A 1970s six-pack in a fly-by-wire
+  // fighter was the last thing in here that still looked like a placeholder.
+  trainer: { stick: 'yoke', levers: 'prop', shell: 0x8f949c, trim: '#241c15', panel: 'classic' },
+  tourer: { stick: 'yoke', levers: 'prop', shell: 0x6d747e, trim: '#1b2029', panel: 'classic' },
+  airliner: { stick: 'yoke', levers: 'jet2', shell: 0x4a5058, trim: '#15181d', panel: 'glass' },
+  fighter: { stick: 'centre', levers: 'jet1', shell: 0x3c4148, trim: '#101318', panel: 'glass' },
+  carrier: { stick: 'centre', levers: 'jet1', shell: 0x424851, trim: '#12161b', panel: 'glass' },
+};
+
+export function createCockpit({ highContrast = false, type = null } = {}) {
+  const style =
+    COCKPIT_STYLES[String((type && type.class) || 'Trainer').toLowerCase()] || COCKPIT_STYLES.trainer;
   const group = new THREE.Group();
   group.name = 'cockpit';
   // Lifted with the eye point (see EYE in flight/camera.js) so the panel keeps
@@ -686,7 +1273,7 @@ export function createCockpit({ highContrast = false } = {}) {
   // what you see from the left seat of a real high-wing trainer.
   group.position.y = 0.29;
 
-  const panel = new InstrumentPanel(highContrast);
+  const panel = new InstrumentPanel(highContrast, style.panel || 'classic');
 
   const shellMat = new THREE.MeshStandardMaterial({
     map: panelTexture(),
@@ -694,27 +1281,46 @@ export function createCockpit({ highContrast = false } = {}) {
     normalScale: new THREE.Vector2(0.6, 0.6),
     roughness: 0.78,
     metalness: 0.06,
-    color: 0x8f949c,
+    color: style.shell,
   });
   const trimMat = new THREE.MeshStandardMaterial({
-    map: leatherTexture('#241c15'),
+    map: leatherTexture(style.trim),
     roughness: 0.85,
   });
 
+  /**
+   * The panel face is bent towards the pilot at the edges.
+   *
+   * A real panel is not a flat board — it wraps, so the outboard instruments
+   * face you instead of facing sideways past your shoulder. On a flat plane
+   * the fuel gauge and the radio stack were both being read at a glancing
+   * angle, which is exactly why the panel looked like a poster.
+   */
+  const curvedPanel = (w, h, curve, segs = 28) => {
+    const g = new THREE.PlaneGeometry(w, h, segs, 2);
+    const p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const t = p.getX(i) / (w / 2);
+      p.setZ(i, t * t * curve);
+    }
+    p.needsUpdate = true;
+    g.computeVertexNormals();
+    return g;
+  };
+
   // Instrument panel face.
-  const faceGeo = new THREE.PlaneGeometry(1.42, 0.71);
   const face = new THREE.Mesh(
-    faceGeo,
+    curvedPanel(1.46, 0.73, 0.075),
     new THREE.MeshStandardMaterial({
       map: panel.texture,
-      roughness: 0.42,
-      metalness: 0.05,
+      roughness: 0.34,
+      metalness: 0.08,
       emissive: 0xffffff,
       emissiveMap: panel.texture,
       emissiveIntensity: 0.22,
     })
   );
-  face.position.set(0, -0.26, -0.92);
+  face.position.set(0, -0.26, -0.94);
   face.rotation.x = 0.2;
   group.add(face);
   group.userData.panelFace = face;
@@ -724,10 +1330,49 @@ export function createCockpit({ highContrast = false } = {}) {
   shell.position.set(0, -0.40, -1.10);
   group.add(shell);
 
-  const glare = new THREE.Mesh(new THREE.BoxGeometry(1.62, 0.1, 0.34), trimMat);
-  glare.position.set(0, 0.02, -1.0);
-  glare.rotation.x = -0.22;
-  group.add(glare);
+  /**
+   * The glareshield: a padded hood that overhangs the panel.
+   *
+   * It was a flat 10 cm strip, which cast nothing and hid nothing. A real one
+   * juts out over the instruments — it is what stops the sun landing on the
+   * dials, and in here it is what gives the top of the panel an edge to sit
+   * under. Built as a lip plus an underside so it reads as thick.
+   */
+  const hood = new THREE.Mesh(new THREE.BoxGeometry(1.64, 0.09, 0.30), trimMat);
+  hood.position.set(0, 0.035, -0.95);
+  hood.rotation.x = -0.20;
+  group.add(hood);
+  // The rolled front edge, a slightly proud cylinder along the lip.
+  const lip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 1.64, 12), trimMat);
+  lip.rotation.z = Math.PI / 2;
+  lip.position.set(0, 0.012, -0.815);
+  group.add(lip);
+  // Underside, darker, so there is a shadow line above the instruments.
+  const hoodUnder = new THREE.Mesh(
+    new THREE.BoxGeometry(1.6, 0.02, 0.26),
+    new THREE.MeshStandardMaterial({ color: 0x0b0d11, roughness: 0.95 })
+  );
+  hoodUnder.position.set(0, -0.018, -0.94);
+  hoodUnder.rotation.x = -0.20;
+  group.add(hoodUnder);
+
+  /**
+   * Centre pedestal and side consoles.
+   *
+   * Everything below the panel used to be one flat kick plate, so the throttle
+   * quadrant and the trim wheel floated in front of nothing. These give them
+   * something to be mounted on, and they close the cabin down towards the
+   * floor the way a real one narrows around your knees.
+   */
+  const pedestal = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.5, 0.34), shellMat);
+  pedestal.position.set(0.14, -0.62, -0.66);
+  pedestal.rotation.x = -0.16;
+  group.add(pedestal);
+  for (const side of [-1, 1]) {
+    const console_ = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.34, 0.9), trimMat);
+    console_.position.set(side * 0.66, -0.72, -0.42);
+    group.add(console_);
+  }
 
   // Windscreen posts and roof.
   for (const side of [-1, 1]) {
@@ -736,21 +1381,53 @@ export function createCockpit({ highContrast = false } = {}) {
     post.rotation.x = -0.28;
     post.rotation.z = side * 0.12;
     group.add(post);
-    const side1 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.62, 1.5), shellMat);
-    side1.position.set(side * 0.78, -0.1, 0.05);
-    group.add(side1);
+    // The cabin sides.
+    //
+    // These used to be a single 0.62 m panel in a cabin 1.57 m tall and 2.1 m
+    // deep, so there was open sky above them, below them, in front of them and
+    // behind them — from the pilot's seat the cockpit had holes all round it.
+    // Now the side is closed from floor to roof and front to back, with one
+    // deliberate gap left where the side window belongs.
+    const SIDE_X = side * 0.78;
+    const WIN_LOW = -0.12; // window sill
+    const WIN_HIGH = 0.32; // window head
+    const FLOOR_Y = -0.95;
+    const ROOF_Y = 0.62;
+    const FRONT_Z = -1.12;
+    const BACK_Z = 1.02;
+    const wall = (h, y, d, z, mat = shellMat) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.06, h, d), mat);
+      m.position.set(SIDE_X, y, z);
+      group.add(m);
+      return m;
+    };
+    // Below the window, all the way along.
+    wall(WIN_LOW - FLOOR_Y, (WIN_LOW + FLOOR_Y) / 2, BACK_Z - FRONT_Z, (BACK_Z + FRONT_Z) / 2);
+    // Above the window, up to the roof.
+    wall(ROOF_Y - WIN_HIGH, (ROOF_Y + WIN_HIGH) / 2, BACK_Z - FRONT_Z, (BACK_Z + FRONT_Z) / 2, trimMat);
+    // Behind the window, closing the corner to the bulkhead.
+    wall(WIN_HIGH - WIN_LOW, (WIN_HIGH + WIN_LOW) / 2, BACK_Z - 0.42, BACK_Z - (BACK_Z - 0.42) / 2);
+    // A slim post between the windscreen and the side window.
+    wall(WIN_HIGH - WIN_LOW, (WIN_HIGH + WIN_LOW) / 2, 0.16, FRONT_Z + 0.08, trimMat);
   }
-  const roofPanel = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.06, 1.7), trimMat);
-  roofPanel.position.set(0, 0.62, 0.1);
+  // Roof and floor are widened to meet the side walls — they were narrower
+  // than the cabin, which left a seam of daylight down each top corner.
+  const roofPanel = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.06, 2.2), trimMat);
+  roofPanel.position.set(0, 0.62, -0.05);
   group.add(roofPanel);
-  const bulkhead = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.1, 0.06), trimMat);
-  bulkhead.position.set(0, 0.06, 1.0);
+  const bulkhead = new THREE.Mesh(new THREE.BoxGeometry(1.68, 1.62, 0.06), trimMat);
+  bulkhead.position.set(0, -0.16, 1.02);
   group.add(bulkhead);
 
   // Floor and rudder pedals.
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.06, 1.8), trimMat);
-  floor.position.set(0, -0.95, -0.1);
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.06, 2.2), trimMat);
+  floor.position.set(0, -0.95, -0.05);
   group.add(floor);
+  // Close the shin gap between the bottom of the instrument panel and the
+  // floor, which was open straight through to the outside world.
+  const kick = new THREE.Mesh(new THREE.BoxGeometry(1.68, 0.62, 0.06), shellMat);
+  kick.position.set(0, -0.66, -1.1);
+  group.add(kick);
   const pedals = [];
   for (const side of [-1, 1]) {
     const p = new THREE.Mesh(
@@ -794,7 +1471,34 @@ export function createCockpit({ highContrast = false } = {}) {
   // third of the windscreen where a real one does, and you can watch it move.
   yoke.position.set(-0.24, -0.09, -0.5);
   yoke.scale.setScalar(0.85);
-  group.add(yoke);
+  if (style.stick === 'yoke') {
+    group.add(yoke);
+  } else {
+    // A fast jet has a stick between your knees, not a control wheel.
+    const stick = new THREE.Group();
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.021, 0.028, 0.34, 10),
+      new THREE.MeshStandardMaterial({ color: 0x23272d, roughness: 0.42, metalness: 0.55 })
+    );
+    shaft.position.y = 0.17;
+    stick.add(shaft);
+    const grip = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.034, 0.034, 0.13, 10),
+      new THREE.MeshStandardMaterial({ color: 0x15181c, roughness: 0.85 })
+    );
+    grip.position.y = 0.4;
+    stick.add(grip);
+    const swMat = new THREE.MeshStandardMaterial({ color: 0x8d939b, roughness: 0.4, metalness: 0.6 });
+    const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.012, 8), swMat);
+    hat.position.set(0, 0.47, -0.012);
+    stick.add(hat);
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.045, 0.014), swMat);
+    trigger.position.set(0, 0.38, -0.036);
+    stick.add(trigger);
+    stick.position.set(-0.05, -0.46, -0.42);
+    group.add(stick);
+    group.userData.stick = stick;
+  }
 
   /* ---------------- Throttle quadrant ---------------- */
   // Three levers, the way a real light single is laid out: black throttle,
@@ -826,17 +1530,28 @@ export function createCockpit({ highContrast = false } = {}) {
     return g;
   };
 
-  const throttleLever = makeLever(0x14171b, 'round');
-  throttleLever.position.set(0.03, -0.4, -0.78);
-  group.add(throttleLever);
-
+  // Propeller aeroplanes get throttle / propeller / mixture. Jets get thrust
+  // levers — one per engine and nothing else, because that is all there is.
+  const throttleLever = makeLever(style.levers === 'prop' ? 0x14171b : 0x22262c, 'round');
   const propLever = makeLever(0x1f4f9c, 'flat');
-  propLever.position.set(0.14, -0.4, -0.78);
-  group.add(propLever);
-
   const mixture = makeLever(0x8a1f1a, 'ribbed');
-  mixture.position.set(0.25, -0.4, -0.78);
-  group.add(mixture);
+  if (style.levers === 'prop') {
+    throttleLever.position.set(0.03, -0.4, -0.78);
+    propLever.position.set(0.14, -0.4, -0.78);
+    mixture.position.set(0.25, -0.4, -0.78);
+    group.add(throttleLever, propLever, mixture);
+  } else {
+    throttleLever.position.set(style.levers === 'jet2' ? 0.09 : 0.14, -0.4, -0.78);
+    throttleLever.scale.set(1, 1.3, 1);
+    group.add(throttleLever);
+    if (style.levers === 'jet2') {
+      const second = makeLever(0x22262c, 'round');
+      second.position.set(0.2, -0.4, -0.78);
+      second.scale.set(1, 1.3, 1);
+      group.add(second);
+      group.userData.throttle2 = second;
+    }
+  }
 
   /* ---------------- Flap lever ---------------- */
   // Sits right of the quadrant and steps through the same detents as the wing.
@@ -871,8 +1586,77 @@ export function createCockpit({ highContrast = false } = {}) {
   group.add(droplets);
 
   let t = 0;
+  /* ---------------- Annunciator panel ----------------
+   *
+   * The row of warning lights along the top of the glareshield. They are dark
+   * until something is wrong, which is the point: when the engine quits you
+   * should not have to read a menu to find out, you should see red in front of
+   * you. MASTER CAUTION flashes whenever any of the others is lit.
+   */
+  function annunciator(label, colour) {
+    const c = document.createElement('canvas');
+    c.width = 128;
+    c.height = 48;
+    const g = c.getContext('2d');
+    g.fillStyle = '#0a0c10';
+    g.fillRect(0, 0, 128, 48);
+    g.fillStyle = '#ffffff';
+    g.font = 'bold 010px system-ui, sans-serif'.replace('010', label.length > 8 ? '17' : '21');
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(label, 64, 25);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshStandardMaterial({
+      map: tex,
+      emissiveMap: tex,
+      emissive: new THREE.Color(colour),
+      emissiveIntensity: 0,
+      color: 0x141820,
+      roughness: 0.6,
+    });
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.108, 0.042), mat);
+    return m;
+  }
+
+  const WARNINGS = [
+    { key: 'engine', label: 'ENGINE', colour: 0xff3b25 },
+    { key: 'fuelLeak', label: 'FUEL', colour: 0xff3b25 },
+    { key: 'elevator', label: 'PITCH', colour: 0xffa42b },
+    { key: 'icing', label: 'ICE', colour: 0xffa42b },
+    { key: 'gear', label: 'GEAR', colour: 0xffa42b },
+    { key: 'brakes', label: 'BRAKES', colour: 0xffa42b },
+    { key: 'roughEngine', label: 'ENG ROUGH', colour: 0xffa42b },
+    { key: 'tyre', label: 'TYRE', colour: 0xffa42b },
+  ];
+  const lamps = [];
+  WARNINGS.forEach((w, i) => {
+    const m = annunciator(w.label, w.colour);
+    // Along the glareshield, tilted back towards the pilot.
+    m.position.set(-0.34 + i * 0.116, 0.10, -0.96);
+    m.rotation.x = -0.42;
+    group.add(m);
+    lamps.push({ ...w, mat: m.material });
+  });
+  const master = annunciator('MASTER CAUTION', 0xff2a1a);
+  master.geometry = new THREE.PlaneGeometry(0.15, 0.05);
+  master.position.set(0.34, 0.165, -0.93);
+  master.rotation.x = -0.42;
+  group.add(master);
+
   group.userData.update = (dt, ac, weather) => {
     t += dt;
+
+    // Warning lights. Steady for the thing that is wrong, and a flashing
+    // master caution so it catches your eye even if you are looking outside.
+    const f = ac.failures || {};
+    let anyLit = false;
+    for (const l of lamps) {
+      const on = !!f[l.key] || (l.key === 'fuelLeak' && ac.fuel > 0 && ac.fuel < 12);
+      if (on) anyLit = true;
+      l.mat.emissiveIntensity = on ? 2.4 : 0;
+    }
+    master.material.emissiveIntensity = anyLit && Math.sin(t * 7) > -0.2 ? 3.0 : 0;
     panel.update(dt, ac, weather);
     const c = ac.controls;
     // Yoke: rotate for aileron, push/pull for elevator.

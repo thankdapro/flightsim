@@ -9,6 +9,7 @@
  */
 
 import { RUNWAY } from '../world/airport.js';
+import { isOnAnyRunway } from '../world/terrain.js';
 import { UNITS } from '../aircraft/physics.js';
 
 const ft = (m) => m * UNITS.FT;
@@ -74,8 +75,22 @@ export class AtcDirector {
       );
     }
 
-    // Advancing the throttle on the ground reads as a take-off request.
-    if (ac.onGround && ac.controls.throttle > 0.45 && this.once('clearance')) {
+    /*
+     * Opening the throttle *lined up on a runway* reads as a take-off request.
+     *
+     * It used to be throttle alone, anywhere on the airfield. Taxiing needs
+     * more than 45% to get a heavy aeroplane rolling at all, so the tower
+     * cleared you for take-off while you were still trundling down a taxiway
+     * with the runway a quarter of a mile away — which is both nonsense and,
+     * for anyone learning, actively misleading about what a clearance means.
+     *
+     * Three conditions now: on a runway, pointing along it, and using real
+     * power rather than taxi power.
+     */
+    const lined =
+      isOnAnyRunway(ac.pos.x, ac.pos.z, 12) &&
+      Math.abs(((ac.readouts().heading - RUNWAY.headingDeg + 540) % 360) - 180) < 25;
+    if (ac.onGround && lined && ac.controls.throttle > 0.6 && this.once('clearance')) {
       this.say(
         `Skylark one seven two, Kestrel Tower, ${windCall(w)}, runway zero nine, cleared for take-off.`,
         'tower'

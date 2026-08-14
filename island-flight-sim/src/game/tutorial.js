@@ -118,20 +118,59 @@ export const TUTORIAL = {
       },
     },
     {
-      id: 'pattern',
-      text: 'Follow the rings around to line up with runway 09.',
-      hint: 'The rings take you downwind, then round onto final approach.',
+      /*
+       * The circuit, flown as a circuit rather than as a slalom.
+       *
+       * This used to be four glowing rings you chased. That teaches you to
+       * chase rings — a real pattern is a shape you fly by looking out of the
+       * window at the runway, and it is the one thing every pilot learns
+       * first. Each leg is now a place to be and a heading to be on, with the
+       * arrow pointing the way, so what you practise is the actual skill.
+       */
+      id: 'downwind',
+      text: 'Turn left onto the downwind leg — fly back parallel to the runway, with it out of your left window.',
+      hint: 'Turn left with A until you are heading roughly west (270°), holding 1,000 feet.',
       atc: {
-        text: 'Follow the rings around the circuit. They will line you up with the runway.',
+        text: 'Turn left downwind for runway zero nine. Keep the runway just off your left wingtip.',
         voice: 'instructor',
       },
-      targetLabel: 'Next ring',
-      gates: [
-        { pos: new THREE.Vector3(-300, ELEV + 330, -1250), heading: 270, radius: 42 },
-        { pos: new THREE.Vector3(-2500, ELEV + 300, -1150), heading: 200, radius: 42 },
-        { pos: new THREE.Vector3(-2900, ELEV + 240, -120), heading: 95, radius: 42 },
-        { pos: new THREE.Vector3(-1700, ELEV + 150, 0), heading: 90, radius: 46 },
-      ],
+      targetLabel: 'Downwind leg',
+      target: () => new THREE.Vector3(-1800, ELEV + 300, -1100),
+      check: (ctx) =>
+        ctx.ac.pos.z < -600 &&
+        ctx.ac.pos.x < 200 &&
+        Math.abs(((ctx.ac.heading - 270 + 540) % 360) - 180) < 45,
+    },
+    {
+      id: 'base',
+      text: 'Good. Now turn left again onto base leg, and start coming down.',
+      hint: 'Turn left to about south (180°) and ease the power back to begin the descent.',
+      atc: {
+        text: 'Turn left base. Start your descent now — aim to be at five hundred feet rolling onto final.',
+        voice: 'instructor',
+      },
+      targetLabel: 'Base leg',
+      target: () => new THREE.Vector3(-2900, ELEV + 200, -500),
+      check: (ctx) =>
+        ctx.ac.pos.x < -2100 &&
+        ctx.ac.pos.z > -1000 &&
+        Math.abs(((ctx.ac.heading - 180 + 540) % 360) - 180) < 60,
+    },
+    {
+      id: 'final',
+      text: 'Last turn — roll out pointing straight at the runway.',
+      hint: 'Turn left onto east (090°) and line the runway up in the middle of your windscreen.',
+      atc: {
+        text: 'Turn final, runway zero nine. Cleared to land.',
+        voice: 'instructor',
+      },
+      targetLabel: 'Runway 09',
+      target: () => RUNWAY.touchdown,
+      check: (ctx) =>
+        ctx.ac.pos.x > -3400 &&
+        ctx.ac.pos.x < RUNWAY.thresholdWest.x - 300 &&
+        Math.abs(ctx.ac.pos.z) < 500 &&
+        Math.abs(((ctx.ac.heading - 90 + 540) % 360) - 180) < 40,
     },
     {
       id: 'land',

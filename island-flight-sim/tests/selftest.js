@@ -92,10 +92,81 @@ function flyApproach(sim, seconds = 60) {
   return t;
 }
 
+/**
+ * Settings the suite assumes. It flies one fixed profile, so anything that
+ * changes the aeroplane, the terrain under it or the assists invalidates the
+ * whole run.
+ *
+ * This exists because of a real and expensive mistake: a browser left on the
+ * Ember map with a different aeroplane and medium quality failed six checks,
+ * and the failures looked exactly like a code regression. Two hours went into
+ * bisecting a bug that was never there. A run that cannot say what settings it
+ * ran under is not evidence of anything, so now it forces them and reports
+ * what it had to change.
+ */
+const TEST_SETTINGS = {
+  map: 'kestrel',
+  aircraft: 'skylark',
+  quality: 'high',
+  flightMode: 'simplified',
+  realisticCockpit: false,
+  freeLook: false,
+  randomWinds: false,
+  realisticFuel: false,
+  startAtGate: false,
+};
+
+/**
+ * Force the assumed settings and hand back a restore function.
+ * `changed` lists what was wrong, so a dirty profile shows up in the results
+ * rather than as six mysterious failures.
+ */
+async function useTestSettings(sim) {
+  const before = {};
+  const changed = [];
+  for (const [k, want] of Object.entries(TEST_SETTINGS)) {
+    before[k] = sim.settings[k];
+    if (sim.settings[k] === want) continue;
+    changed.push(`${k}: ${sim.settings[k]} → ${want}`);
+    if (k === 'map') {
+      // Changing map rebuilds the world and drops to the menu, so it has to
+      // settle before anything flies.
+      sim.setMap(want);
+      for (let i = 0; i < 200 && sim.settings.map !== want; i++) await new Promise((f) => setTimeout(f, 10));
+      await new Promise((f) => setTimeout(f, 120));
+    } else if (k === 'aircraft') {
+      sim.setAircraft(want);
+      sim.settings.aircraft = want;
+    } else {
+      sim.settings[k] = want;
+    }
+  }
+  return {
+    changed,
+    restore() {
+      for (const [k, v] of Object.entries(before)) {
+        if (k === 'map' || k === 'aircraft') continue; // rebuilding on the way out is not worth it
+        sim.settings[k] = v;
+      }
+    },
+  };
+}
+
 export async function runSelfTest(sim, opts = {}) {
   const r = makeReporter();
   const verbose = opts.verbose !== false;
   const say = (...a) => verbose && console.log('[selftest]', ...a);
+
+  // Before anything else: put the simulator in the state the suite assumes.
+  const profile = await useTestSettings(sim);
+  if (profile.changed.length) {
+    say('settings were not at defaults —', profile.changed.join(', '));
+  }
+  r.ok(
+    'ran on default settings',
+    true,
+    profile.changed.length ? `forced: ${profile.changed.join(', ')}` : 'already clean'
+  );
 
   const origMode = sim.settings.flightMode;
   const origQuality = sim.settings.quality;
@@ -242,11 +313,36 @@ export async function runSelfTest(sim, opts = {}) {
     views.push(sim.rig.mode);
   }
   r.ok('all five camera views work', new Set(views).size === 5, views.join(', '));
-  r.ok('cockpit view renders instruments', (() => {
+  // There are two cockpit views now. The default is the clean one — no panel
+  // in the way, instruments on the overlay — and the panel only appears when
+  // you ask for the realistic cockpit. So the check is that each view does
+  // its own job, not that the panel is always there.
+  r.ok('cockpit view draws a cockpit', (() => {
+    // Both cockpit views show the interior. The plain one used to hide it
+    // entirely, which reads as a broken camera rather than a clean view.
+    sim.settings.realisticCockpit = false;
+    sim.rig.realisticCockpit = false;
     sim.rig.setMode('cockpit');
+    sim.step(0.5);
+    return sim.cockpit.visible === true && !!sim.cockpit.userData.panel.texture;
+  })());
+  r.ok('realistic cockpit narrows the field of view', (() => {
+    sim.rig.realisticCockpit = false;
+    sim.step(1.5);
+    const wide = sim.camera.fov;
+    sim.settings.realisticCockpit = true;
+    sim.rig.realisticCockpit = true;
+    sim.step(2.5);
+    return sim.camera.fov < wide - 2;
+  })());
+  r.ok('realistic cockpit view renders instruments', (() => {
+    sim.settings.realisticCockpit = true;
+    sim.rig.realisticCockpit = true;
     sim.step(0.5);
     return sim.cockpit.visible && !!sim.cockpit.userData.panel.texture;
   })());
+  sim.settings.realisticCockpit = false;
+  sim.rig.realisticCockpit = false;
   sim.rig.setMode('chase');
 
   /* ---------------------------------------------------------------- *
@@ -504,22 +600,37 @@ export async function runSelfTest(sim, opts = {}) {
    * 13. Missions
    * ---------------------------------------------------------------- */
   say('missions');
-  // Circuit: check the rings exist and can be flown through by teleporting.
+  /*
+   * Circuit: the lap round the coast.
+   *
+   * This used to check five floating rings. There are no rings any more —
+   * every navigation objective is a real place with a position check — so it
+   * now flies the lap by putting the aeroplane at each point in turn and
+   * confirming the mission follows along.
+   */
   await sim.startMode('mission', { id: 'circuit' });
   r.ok('circuit mission starts', sim.runner.def.id === 'circuit' && sim.runner.status === 'running');
-  // Jump straight to the ring step.
-  while (sim.runner.step && sim.runner.step.id !== 'rings') sim.runner.skipStep();
+  r.ok('no checkpoint rings anywhere in the circuit', sim.runner.gates.length === 0, `${sim.runner.gates.length} rings`);
+  while (sim.runner.step && sim.runner.step.id !== 'lap') sim.runner.skipStep();
   sim.step(0.2);
-  r.ok('checkpoint rings are created', sim.runner.gates.length === 5, `${sim.runner.gates.length} rings`);
-  r.ok('one ring is highlighted as next', sim.runner.gates.filter((g) => g.active).length === 1);
-  // Fly through each ring by placing the aeroplane at its centre.
-  for (const gate of [...sim.runner.gates]) {
-    sim.aircraft.pos.copy(gate.pos);
-    sim.step(0.1);
+  r.ok('circuit reaches the lap', sim.runner.step && sim.runner.step.id === 'lap', sim.runner.step && sim.runner.step.id);
+  // Fly the lap by visiting each point the steps ask for.
+  const V3 = sim.aircraft.pos.constructor;
+  const lapPoints = [
+    [2400, 500, -1400],
+    [2200, 500, 1900],
+    [-1600, 460, 1800],
+  ];
+  for (const [x, y, z] of lapPoints) {
+    sim.aircraft.pos.set(x, sim.airport ? y + 6 : y, z);
+    sim.step(0.2);
   }
-  r.ok('all rings register when flown through', sim.runner.gates.every((g) => g.passed) || sim.runner.step.id !== 'rings');
   sim.step(0.3);
-  r.ok('mission moves on after the rings', sim.runner.step && sim.runner.step.id === 'downwind', sim.runner.step && sim.runner.step.id);
+  r.ok(
+    'the lap advances the mission',
+    sim.runner.step && sim.runner.step.id === 'downwind',
+    sim.runner.step && sim.runner.step.id
+  );
 
   // Delivery: verify the cargo drop.
   await sim.startMode('mission', { id: 'delivery' });
@@ -636,6 +747,7 @@ export async function runSelfTest(sim, opts = {}) {
   sim.settings.flightMode = origMode;
   sim.settings.quality = origQuality;
   sim.aircraft.mode = origMode;
+  profile.restore();
   allUp(sim);
 
   const failed = r.failed;

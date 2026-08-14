@@ -31,8 +31,19 @@ export const AIRPORT = {
   elev: 14,
   headingDeg: 90,
   runway: { cx: 0, cz: 0, length: 1100, halfWidth: 17 },
+  /**
+   * The crosswind runway, 18/36, crossing the main one east of the apron.
+   *
+   * One runway means a strong crosswind is simply a bad day. Two crossing
+   * runways means it is a decision — which is the interesting version, and it
+   * is why real airfields are laid out like this. Deliberately shorter and
+   * narrower than 09/27, so choosing it costs you something.
+   */
+  runway2: { cx: 250, cz: -70, length: 900, halfWidth: 15, headingDeg: 180 },
   // Smooth flattening region (a bit larger than the paved area).
   pad: { x0: -680, x1: 680, z0: -230, z1: 190, blend: 190 },
+  // ...and a second one for 18/36, so its ends are level too.
+  pad2: { x0: 170, x1: 330, z0: -580, z1: 440, blend: 170 },
 };
 
 /**
@@ -41,6 +52,8 @@ export const AIRPORT = {
  * including the mountainous ones — especially the mountainous ones.
  */
 export const CORRIDOR = { halfWidth: 380, blend: 320, fadeFrom: 3600, length: 5400 };
+/** The same idea for 18/36, running north-south instead. */
+export const CORRIDOR2 = { halfWidth: 300, blend: 260, fadeFrom: 2600, length: 4200 };
 
 /* ------------------------------------------------------------------ */
 /* Active map                                                          */
@@ -86,12 +99,16 @@ function islandField(x, z, isl) {
 }
 
 /** Weight of the flattened airport plateau at this point (0..1). */
-function padWeight(x, z) {
-  const p = AIRPORT.pad;
+function regionWeight(p, x, z) {
   if (x < p.x0 - p.blend || x > p.x1 + p.blend || z < p.z0 - p.blend || z > p.z1 + p.blend) return 0;
   const inX = smoothstep(p.x0 - p.blend, p.x0, x) * (1 - smoothstep(p.x1, p.x1 + p.blend, x));
   const inZ = smoothstep(p.z0 - p.blend, p.z0, z) * (1 - smoothstep(p.z1, p.z1 + p.blend, z));
   return inX * inZ;
+}
+
+/** Both runways sit on the same level plateau, so take whichever is stronger. */
+function padWeight(x, z) {
+  return Math.max(regionWeight(AIRPORT.pad, x, z), regionWeight(AIRPORT.pad2, x, z));
 }
 
 /**
@@ -109,6 +126,54 @@ function outpostWeight(x, z) {
   const inX = 1 - smoothstep(o.halfLen, o.halfLen + o.blend, dx);
   const inZ = 1 - smoothstep(o.halfWidth, o.halfWidth + o.blend, dz);
   return inX * inZ;
+}
+
+/**
+ * Solid structures you can fly into.
+ *
+ * The ground has always been solid; buildings were not, so the tower and the
+ * terminal were scenery you passed straight through. Each entry is an
+ * axis-aligned box in world metres — good enough for a tower, a hangar or a
+ * terminal, and cheap enough to test every hard point against every frame.
+ *
+ * The world owns these: `buildWorld` clears the list and each piece registers
+ * itself as it is built, so switching map or graphics level cannot leave a
+ * ghost building behind to crash into.
+ */
+export const OBSTACLES = [];
+
+export function clearObstacles() {
+  OBSTACLES.length = 0;
+}
+
+/**
+ * @param {object} box {x0,x1,y0,y1,z0,z1, what} — `what` is the crash message.
+ */
+export function addObstacle(box) {
+  OBSTACLES.push(box);
+  return box;
+}
+
+/** Register a box by centre and size, which is how everything is modelled. */
+export function addObstacleAt(cx, cz, width, depth, baseY, height, what) {
+  return addObstacle({
+    x0: cx - width / 2,
+    x1: cx + width / 2,
+    z0: cz - depth / 2,
+    z1: cz + depth / 2,
+    y0: baseY,
+    y1: baseY + height,
+    what,
+  });
+}
+
+/** The structure at this point, or null. */
+export function obstacleAt(x, y, z) {
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const o = OBSTACLES[i];
+    if (x >= o.x0 && x <= o.x1 && z >= o.z0 && z <= o.z1 && y >= o.y0 && y <= o.y1) return o;
+  }
+  return null;
 }
 
 /** Terrain height in metres above sea level (sea level is y = 0). */
@@ -161,15 +226,35 @@ export function heightAt(x, z) {
         break;
       }
       case 'cone': {
-        // A volcano. The island field already falls off from the middle, so
-        // raising it to a power turns it into a cone, and a dip in the last
-        // tenth cuts the crater into the summit.
+        // A volcano.
+        //
+        // This used to be shaped from `m`, the island field — but that
+        // saturates at 1 across the whole middle of the island, so the "cone"
+        // came out as a flat table 2 km wide at a constant height and the
+        // "crater" never appeared at all. That is why Ember Isle read as a
+        // mountain rather than a volcano.
+        //
+        // Shape it from the radius instead. The summit is the crater *rim*,
+        // the flanks fall away from there with the slight concavity a real
+        // strato-volcano has, and the middle is a genuine bowl you can fly
+        // down into.
+        const dRel = Math.min(1, Math.hypot(x - isl.cx, z - isl.cz) / isl.radius);
+        const rimRel = (isl.craterRadius || isl.radius * 0.12) / isl.radius;
         const inland = smoothstep(0.02, 0.5, m);
-        const crater = (isl.crater || 0) * smoothstep(0.86, 1, m);
+
+        // 1 at the rim, 0 down at the shoreline.
+        const flank = Math.pow(clamp((1 - dRel) / (1 - rimRel), 0, 1), 1.55);
+        // Radial gullies down the flanks — real cones are fluted, not smooth.
+        const ang = Math.atan2(z - isl.cz, x - isl.cx);
+        const gully =
+          (Math.sin(ang * 13 + isl.seed) * 0.5 + 0.5) * smoothstep(rimRel, 0.85, dRel);
+        // The crater bowl: flat-floored in the middle, up to the rim.
+        const bowl = 1 - smoothstep(rimRel * 0.55, rimRel, dRel);
+
         local =
           lerp(-5, 20, smoothstep(0, 0.3, m)) +
-          inland * (Math.pow(m, 1.35) * isl.peak + hills * isl.peak * 0.1) -
-          crater +
+          inland * (flank * isl.peak * (1 - gully * 0.045) + hills * isl.peak * 0.06) -
+          inland * (isl.crater || 0) * bowl +
           inland * detail * 7;
         break;
       }
@@ -206,6 +291,18 @@ export function heightAt(x, z) {
     if (h > ceiling) h = lerp(h, ceiling, w);
   }
 
+  // And the same the other way, for 18/36. A second runway you cannot approach
+  // is not a second runway.
+  const along2 = Math.abs(z - AIRPORT.runway2.cz);
+  const across2 = Math.abs(x - AIRPORT.runway2.cx);
+  if (along2 < CORRIDOR2.length && across2 < CORRIDOR2.halfWidth + CORRIDOR2.blend) {
+    const lateral = 1 - smoothstep(CORRIDOR2.halfWidth, CORRIDOR2.halfWidth + CORRIDOR2.blend, across2);
+    const longitudinal = 1 - smoothstep(CORRIDOR2.fadeFrom, CORRIDOR2.length, along2);
+    const w = lateral * longitudinal;
+    const ceiling = AIRPORT.elev + 10;
+    if (h > ceiling) h = lerp(h, ceiling, w);
+  }
+
   return h;
 }
 
@@ -228,16 +325,58 @@ export function isOnRunway(x, z, margin = 0) {
   );
 }
 
+/** The crosswind runway. Runs along Z, so the tests are the other way round. */
+export function isOnRunway2(x, z, margin = 0) {
+  const r = AIRPORT.runway2;
+  return (
+    Math.abs(x - r.cx) <= r.halfWidth + margin &&
+    Math.abs(z - r.cz) <= r.length / 2 + margin
+  );
+}
+
+/** On either runway — what landing scoring and the ATC should ask. */
+export function isOnAnyRunway(x, z, margin = 0) {
+  return isOnRunway(x, z, margin) || isOnRunway2(x, z, margin);
+}
+
+/**
+ * Which runway the wind favours, and by how much.
+ * Returns the better of the four directions with its head- and crosswind.
+ */
+export function bestRunway(windDirDeg, windKts) {
+  const options = [
+    { name: '09', headingDeg: 90, runway: AIRPORT.runway },
+    { name: '27', headingDeg: 270, runway: AIRPORT.runway },
+    { name: '18', headingDeg: 180, runway: AIRPORT.runway2 },
+    { name: '36', headingDeg: 360, runway: AIRPORT.runway2 },
+  ].map((o) => {
+    const rel = ((windDirDeg - o.headingDeg + 540) % 360) - 180;
+    const rad = (rel * Math.PI) / 180;
+    return {
+      ...o,
+      headwind: Math.cos(rad) * windKts,
+      crosswind: Math.abs(Math.sin(rad)) * windKts,
+    };
+  });
+  // Most headwind wins; a tailwind is disqualifying before anything else.
+  options.sort((a, b) => b.headwind - a.headwind);
+  return options[0];
+}
+
 /** True when the point is paved (runway, taxiway or apron). */
 export function isPaved(x, z) {
   if (isOnRunway(x, z, 2)) return true;
+  // The crosswind runway.
+  if (isOnRunway2(x, z, 2)) return true;
   // Taxiway running parallel, south of the runway.
   if (Math.abs(z + 95) <= 12 && Math.abs(x) <= 430) return true;
   // Two connectors.
   if (Math.abs(x - -430) <= 12 && z >= -95 && z <= 0) return true;
   if (Math.abs(x - 0) <= 12 && z >= -95 && z <= 0) return true;
   // Apron.
-  if (x >= -260 && x <= 100 && z >= -190 && z <= -110) return true;
+  // The apron runs right up to the taxiway edge. It used to stop 3 m short,
+  // leaving a strip of grass between them that you had to taxi across.
+  if (x >= -260 && x <= 100 && z >= -190 && z <= -106) return true;
   return false;
 }
 
@@ -345,6 +484,9 @@ function makeTerrainMaterial() {
     shader.uniforms.uTintSand = { value: new THREE.Vector3(...(tint.sand || [1, 1, 1])) };
     shader.uniforms.uTintRock = { value: new THREE.Vector3(...(tint.rock || [1, 1, 1])) };
     shader.uniforms.uShallow = { value: new THREE.Vector3(...(tint.shallow || [0.31, 0.84, 0.78])) };
+    // Snow line. Off by default — a start height above anything on the map
+    // costs one compare per fragment and changes nothing.
+    shader.uniforms.uSnow = { value: new THREE.Vector2(...(tint.snow || [99999, 99999])) };
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -368,7 +510,8 @@ function makeTerrainMaterial() {
          uniform vec3 uTintGrass;
          uniform vec3 uTintSand;
          uniform vec3 uTintRock;
-         uniform vec3 uShallow;`
+         uniform vec3 uShallow;
+         uniform vec2 uSnow;`
       )
       .replace(
         '#include <map_fragment>',
@@ -406,6 +549,12 @@ function makeTerrainMaterial() {
         // that matches the sea it meets.
         float wet = 1.0 - smoothstep(-0.6, 3.2, vGroundY);
         blended.rgb = mix(blended.rgb, uShallow, wet * 0.88);
+        // Snow on the high ground. The splat noise ragged-edges the snow line
+        // so it follows the terrain instead of drawing a contour ring, and
+        // steep faces keep their rock — snow does not sit on a cliff.
+        float snow = smoothstep(uSnow.x, uSnow.y, vGroundY + (tint - 0.5) * 90.0);
+        snow *= 1.0 - vBlend.z * 0.55;
+        blended.rgb = mix(blended.rgb, vec3(0.93, 0.95, 0.99), snow);
         diffuseColor *= blended;
         `
       );

@@ -48,6 +48,10 @@ export class Weather {
     this._wind = new THREE.Vector3();
     this._gust = new THREE.Vector3();
     this.lightningFlash = 0;
+    /** Active weather events. Null unless a disaster is running. */
+    this._shear = null;
+    this._tempCond = null;
+    this._front = null;
     this._nextLightning = 6;
 
     /* ---- Random winds ---- */
@@ -140,7 +144,60 @@ export class Weather {
   }
 
   get cond() {
-    return CONDITIONS[this.condition];
+    const base = CONDITIONS[this._tempCond ? this._tempCond.id : this.condition];
+    if (this._tempCond && this._tempCond.overrides) return { ...base, ...this._tempCond.overrides };
+    return base;
+  }
+
+  /**
+   * Windshear: a column of sinking air with an outflow at the bottom, which is
+   * what a microburst actually is. The downdraught is the frightening part but
+   * the headwind-to-tailwind swing through the middle is the dangerous one.
+   */
+  startShear({ down = 10, headwind = 12, seconds = 30 } = {}) {
+    this._shear = { left: seconds, total: seconds, down, headwind };
+  }
+
+  /** A gust front: the wind jumps in strength and swings round. */
+  gustFront({ speedMultiplier = 2.5, turnDeg = 60, seconds = 60 } = {}) {
+    this._front = {
+      left: seconds,
+      fromKts: this.windSpeedKts,
+      fromDir: this.windDirDeg,
+    };
+    this.windSpeedKts = this.windSpeedKts * speedMultiplier + 6;
+    this.windDirDeg = (this.windDirDeg + turnDeg + 360) % 360;
+    this.baseWindKts = this.windSpeedKts;
+    this.baseWindDirDeg = this.windDirDeg;
+  }
+
+  /** Swap the sky for a while, then put it back the way it was. */
+  temporaryCondition(id, seconds, overrides = null) {
+    if (!CONDITIONS[id]) return;
+    this._tempCond = { id, left: seconds, overrides };
+  }
+
+  /**
+   * Vertical air movement in metres per second, positive downwards. Only a
+   * microburst produces it, and the flight model subtracts it from the
+   * aeroplane's relative airflow.
+   */
+  get downdraft() {
+    if (!this._shear || this._shear.left <= 0) return 0;
+    // Strongest in the middle of the encounter, nothing at the edges.
+    const t = 1 - this._shear.left / this._shear.total;
+    return this._shear.down * Math.sin(Math.min(1, Math.max(0, t)) * Math.PI);
+  }
+
+  /**
+   * The headwind gained or lost inside the shear, in m/s along the current
+   * wind direction: a gain on the way in, a loss on the way out, which is the
+   * part that catches people.
+   */
+  get shearHeadwind() {
+    if (!this._shear || this._shear.left <= 0) return 0;
+    const t = 1 - this._shear.left / this._shear.total;
+    return this._shear.headwind * Math.cos(Math.min(1, Math.max(0, t)) * Math.PI);
   }
 
   get timeInfo() {
@@ -165,7 +222,9 @@ export class Weather {
    * X is east, Z is south (three.js default: -Z is north).
    */
   windVector(out = this._wind) {
-    const speed = this.effectiveWindKts * 0.514444;
+    // A microburst adds a headwind that decays into a tailwind as you pass
+    // through it, on top of whatever the wind was already doing.
+    const speed = this.effectiveWindKts * 0.514444 + this.shearHeadwind;
     const from = THREE.MathUtils.degToRad(this.windDirDeg);
     // Wind FROM north (0°) blows toward the south (+Z).
     out.set(-Math.sin(from) * speed, 0, Math.cos(from) * speed);
@@ -192,6 +251,26 @@ export class Weather {
   update(dt) {
     this.time_s += dt;
     if (this.randomWinds) this._updateRandomWinds(dt);
+
+    // Weather events run themselves down and put things back as they were.
+    if (this._shear) {
+      this._shear.left -= dt;
+      if (this._shear.left <= 0) this._shear = null;
+    }
+    if (this._tempCond) {
+      this._tempCond.left -= dt;
+      if (this._tempCond.left <= 0) this._tempCond = null;
+    }
+    if (this._front) {
+      this._front.left -= dt;
+      if (this._front.left <= 0) {
+        this.windSpeedKts = this._front.fromKts;
+        this.windDirDeg = this._front.fromDir;
+        this.baseWindKts = this.windSpeedKts;
+        this.baseWindDirDeg = this.windDirDeg;
+        this._front = null;
+      }
+    }
     // Lightning during storms.
     if (this.condition === 'stormy') {
       this._nextLightning -= dt;

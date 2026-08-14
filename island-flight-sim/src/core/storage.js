@@ -12,6 +12,12 @@ export const DEFAULT_SETTINGS = {
   map: 'kestrel',
   flightMode: 'simplified',
   volumes: { master: 0.85, engine: 0.8, environment: 0.7, atc: 0.85, alerts: 0.9, music: 0.35 },
+  /**
+   * On/off per source, separate from the volumes. Turning the ATC slider to
+   * zero and forgetting you did it is not the same as switching the radio off,
+   * and only one of those is easy to undo.
+   */
+  soundOn: { engine: true, environment: true, atc: true, alerts: true, music: true },
   // Sound starts off so the game never surprises anyone with noise; there is
   // a one-click toggle on the start screen and in Settings → Sound.
   muted: true,
@@ -32,6 +38,12 @@ export const DEFAULT_SETTINGS = {
   realisticFuel: false,
   // Look around the cockpit with the mouse or arrow keys.
   freeLook: false,
+  // Free flight begins on the parking stand and you taxi out.
+  startAtGate: false,
+  // The pilot's-eye cockpit view: narrower field of view, and the flight
+  // instruments read off the panel instead of the overlay.
+  realisticCockpit: false,
+  aircraft: 'skylark',
   atcChatter: true,
   // 'radio' (synthesised, no TTS) | 'speech' (browser TTS) | 'recordings'
   atcVoice: 'radio',

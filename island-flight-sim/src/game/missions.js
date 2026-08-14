@@ -1,10 +1,25 @@
 /**
- * The three missions.
+ * The missions.
  *
- *   1. Island Circuit  — take off, fly through five checkpoint rings, land.
+ *   1. Island Circuit  — take off, fly a lap of the coast, land.
  *   2. Mango Cay Delivery — carry supplies to the neighbouring island, drop
  *      them on the target, come home.
  *   3. Storm Approach — a crosswind landing in a thunderstorm.
+ *   4. Dead Stick — the engine quits at 3,000 ft and you land it anyway.
+ *   5. Ember Run — a timed lap of an erupting volcano, in the fighter.
+ *   6. Night Medevac — a pickup on Mango Cay, at night, in rain.
+ *   7. Storm Chaser — three passes through a tornado's outer bands.
+ *
+ * The first three teach. The last four are the ones with teeth: each has a way
+ * to lose that is not simply crashing — running out of height, running out of
+ * time, landing short, or being pulled into the core — because a challenge you
+ * can only fail by flying into the ground is not really a challenge.
+ *
+ * Nothing here uses floating checkpoint rings any more. Rings teach you to
+ * chase rings: you stare at a glowing hoop and the island underneath becomes
+ * wallpaper. Every navigation objective is now a real place — a headland, a
+ * flank of the mountain, a leg of the circuit — with the HUD arrow pointing
+ * the way, which is the same exercise with the world put back into it.
  *
  * Every instruction is written the way an instructor would say it to a child:
  * one action, plainly stated, with the number that matters.
@@ -47,11 +62,11 @@ export const MISSIONS = [
   {
     id: 'circuit',
     name: 'Island Circuit',
-    short: 'Checkpoint flight',
+    short: 'Island lap',
     difficulty: 'Easy',
     icon: '◎',
     blurb:
-      'Take off from Kestrel Island, fly through five glowing rings around the island, then come back and land.',
+      'Take off from Kestrel Island, fly a full lap of the coast, then come back and land.',
     reward: 'Teaches turning, altitude control and the landing pattern.',
     weather: { time: 'day', condition: 'clear', windSpeedKts: 6, windDirDeg: 110 },
     spawn: RUNWAY_START,
@@ -87,17 +102,36 @@ export const MISSIONS = [
         check: (ctx) => ft(ctx.ac.alt) > 1400,
       },
       {
-        id: 'rings',
-        text: 'Fly through the blue rings. Turn with A and D.',
-        hint: 'Lean into the turn with A or D, then centre the controls again.',
-        targetLabel: 'Next ring',
-        gates: [
-          { pos: new THREE.Vector3(1500, ELEV + 470, -260), heading: 90, radius: 40 },
-          { pos: new THREE.Vector3(2400, ELEV + 520, 1500), heading: 160, radius: 40 },
-          { pos: new THREE.Vector3(500, ELEV + 620, 2500), heading: 250, radius: 40 },
-          { pos: new THREE.Vector3(-1800, ELEV + 560, 1400), heading: 320, radius: 40 },
-          { pos: new THREE.Vector3(-2200, ELEV + 430, -700), heading: 30, radius: 40 },
-        ],
+        /*
+         * A lap of the island, flown by looking at the island.
+         *
+         * This was five glowing rings. Rings teach you to chase rings: you
+         * stare at a floating hoop and the world underneath becomes wallpaper.
+         * Rounding a headland you can actually see, at a height you have to
+         * hold, is the same navigation exercise with the scenery put back in.
+         */
+        id: 'lap',
+        text: 'Now fly a lap of the island, keeping the coast on your right. Stay between 1,200 and 2,200 feet.',
+        hint: 'Turn with A and D. Follow the shoreline round — the arrow shows you the next headland.',
+        targetLabel: 'North point',
+        target: () => new THREE.Vector3(2400, ELEV + 500, -1400),
+        check: (ctx) => ctx.ac.pos.x > 1800 && ctx.ac.pos.z < -700,
+      },
+      {
+        id: 'lap2',
+        text: 'Round the north point. Carry on round the east side of the island.',
+        hint: 'Keep turning right as the coast curves away. Hold your height.',
+        targetLabel: 'East bay',
+        target: () => new THREE.Vector3(2200, ELEV + 500, 1900),
+        check: (ctx) => ctx.ac.pos.z > 1300 && ctx.ac.pos.x > 900,
+      },
+      {
+        id: 'lap3',
+        text: 'Round the south side now, back towards the airfield.',
+        hint: 'The airfield is on the west of the island. Keep the coast on your right.',
+        targetLabel: 'South shore',
+        target: () => new THREE.Vector3(-1600, ELEV + 460, 1800),
+        check: (ctx) => ctx.ac.pos.x < -1100 && ctx.ac.pos.z > 1100,
       },
       {
         id: 'downwind',
@@ -291,6 +325,326 @@ export const MISSIONS = [
       const l = ctx.data.lastTouchdown;
       const base = l ? l.score : 30;
       return Math.round(base * 0.85 + 15);
+    },
+  },
+  /* ------------------------------------------------------------------ *
+   * 4. Dead Stick — the engine quits and you land it anyway.
+   *
+   * The purest challenge in flying and the one the game was missing: no
+   * power, one attempt, and a runway you have exactly enough height to
+   * reach if you do not waste any of it. There is no time limit because
+   * gravity is the time limit.
+   * ------------------------------------------------------------------ */
+  {
+    id: 'deadstick',
+    name: 'Dead Stick',
+    short: 'Engine-out landing',
+    difficulty: 'Hard',
+    icon: '⚠',
+    blurb:
+      'Your engine quits at 3,000 feet over the sea. You have one glide and one attempt at the runway. ' +
+      'No power, no going around.',
+    reward: 'Teaches gliding, energy management and committing to a decision.',
+    weather: { time: 'day', condition: 'clear', windSpeedKts: 7, windDirDeg: 90 },
+    /*
+     * Where this starts is the whole difficulty, and it was wrong.
+     *
+     * Measured, the Skylark glides 7.9:1 with the propeller stopped. From 915 m
+     * that is about 6,950 m of still-air range; the first spawn was 6,650 m
+     * from the threshold, which left a 4% margin — any turn, any second held
+     * at the wrong speed, and it was unwinnable. Nobody wants a puzzle whose
+     * only solution is "fly perfectly from the first frame".
+     *
+     * 5,450 m out leaves about a quarter of the glide in hand: enough to lose
+     * some of it and still make the runway, not enough to be casual about.
+     */
+    spawn: { pos: new THREE.Vector3(-6000, ELEV + 915, 500), headingDeg: 90, speed: 62, altAGL: 915 },
+    parTime: 260,
+    steps: [
+      {
+        id: 'quit',
+        text: 'Your engine has just failed. Lower the nose and hold 65 knots — that is your best glide.',
+        hint: 'Too slow and you fall out of the sky; too fast and you arrive low. 65 knots gets you furthest.',
+        atc: { text: 'Mayday, mayday — Skylark one seven two, engine failure, gliding to runway zero nine.', voice: 'pilot' },
+        targetLabel: 'Best glide, 65 kt',
+        enter: (ctx) => {
+          // The failure is the mission. Arm it the moment the step begins.
+          if (!ctx.ac.failures.engine) ctx.sim.toggleFailure('engine');
+        },
+        check: (ctx) => ctx.ac.ias * UNITS.KTS < 78 && ctx.ac.ias * UNITS.KTS > 52 && ctx.elapsed > 6,
+      },
+      {
+        id: 'glide',
+        text: 'Now stretch it. Aim for the runway and do not turn any more than you have to.',
+        hint: 'Every turn costs height. Straight is cheap — pick the runway and go.',
+        targetLabel: 'Runway 09 threshold',
+        target: () => RUNWAY.thresholdWest.clone(),
+        check: (ctx) => ctx.ac.pos.x > RUNWAY.thresholdWest.x - 2600 && ft(ctx.ac.agl) < 900,
+      },
+      {
+        id: 'touch',
+        text: 'Land it. Flaps when the runway is made, and flare — you only get one of these.',
+        hint: 'Do not put the flaps down early: they add drag and you may not reach.',
+        targetLabel: 'Touchdown zone',
+        target: () => RUNWAY.touchdown,
+        check: landedAndStopped,
+      },
+    ],
+    failIf: (ctx) => {
+      // Landing anywhere but the airfield is a crash you walked away from —
+      // but it is not the mission.
+      if (ctx.ac.onGround && ctx.ac.pos.x < RUNWAY.thresholdWest.x - 60 && ctx.ac.groundSpeed < 6) {
+        return 'You came down short of the runway';
+      }
+      return null;
+    },
+    onComplete: (ctx) => {
+      ctx.sim.speak('Skylark one seven two, that was very nicely flown. Emergency services standing down.', 'tower');
+    },
+    score: (ctx) => {
+      const l = ctx.data.lastTouchdown;
+      // Weighted almost entirely on the touchdown: with no engine, arriving
+      // gently is the whole skill.
+      return Math.round((l ? l.score : 20) * 0.9 + 10);
+    },
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 5. Ember Run — the volcano, in the fast jet, against the clock.
+   * ------------------------------------------------------------------ */
+  {
+    id: 'emberrun',
+    name: 'Ember Run',
+    short: 'Volcano time trial',
+    difficulty: 'Hard',
+    icon: '🌋',
+    blurb:
+      'A timed lap of Mount Ember in the fighter — four minutes. The mountain is erupting, the air ' +
+      'over the cone is filthy, and the fighter does not turn tightly.',
+    reward: 'Teaches precise, fast flying and how to read terrain.',
+    map: 'ember',
+    aircraft: 'vanguard',
+    weather: { time: 'sunset', condition: 'cloudy', windSpeedKts: 18, windDirDeg: 200 },
+    spawn: { pos: new THREE.Vector3(-5200, ELEV + 700, 300), headingDeg: 90, speed: 120, altAGL: 700 },
+    timeLimit: 240,
+    parTime: 190,
+    steps: [
+      {
+        id: 'brief',
+        text: 'One lap of the mountain. Four minutes. Go.',
+        hint: 'The fighter is fast — you will need to think a long way ahead of it.',
+        atc: { text: 'Vanguard zero one, the mountain is active. Clock is running.', voice: 'tower' },
+        check: (ctx) => ctx.elapsed > 3,
+      },
+      {
+        /*
+         * A lap of the mountain, not a slalom through hoops. Four points you
+         * fly round, each a real place on the terrain, against the clock.
+         */
+        id: 'lap',
+        text: 'One lap of Mount Ember, anticlockwise, and land. Watch the ash over the summit.',
+        hint: 'Stay wide of the crater — the ash will choke the engine. The arrow shows the next point.',
+        targetLabel: 'North flank',
+        target: () => new THREE.Vector3(2500, ELEV + 900, -4600),
+        check: (ctx) => ctx.ac.pos.z < -3900 && ctx.ac.pos.x > 1200,
+      },
+      {
+        id: 'lap2',
+        text: 'Round the far side.',
+        hint: 'Keep the mountain on your left and do not cut across the top of it.',
+        targetLabel: 'East flank',
+        target: () => new THREE.Vector3(4700, ELEV + 1000, -2300),
+        check: (ctx) => ctx.ac.pos.x > 4000 && ctx.ac.pos.z > -3400,
+      },
+      {
+        id: 'lap3',
+        text: 'South side. Keep it moving.',
+        hint: 'The clock is still running.',
+        targetLabel: 'South flank',
+        target: () => new THREE.Vector3(3000, ELEV + 800, 400),
+        check: (ctx) => ctx.ac.pos.z > -300 && ctx.ac.pos.x > 1800,
+      },
+      {
+        id: 'lap4',
+        text: 'Round the west and back towards the field.',
+        hint: 'Almost there — start losing height for the landing.',
+        targetLabel: 'West flank',
+        target: () => new THREE.Vector3(-600, ELEV + 620, -800),
+        check: (ctx) => ctx.ac.pos.x < 200,
+      },
+      {
+        id: 'land',
+        text: 'Lap complete. Now bring it home and land it — the clock is still running.',
+        hint: 'The fighter lands fast and flat. Get the speed off early.',
+        targetLabel: 'Runway 09',
+        target: () => RUNWAY.touchdown,
+        check: landedAndStopped,
+      },
+    ],
+    onComplete: (ctx) => {
+      ctx.sim.speak('Vanguard zero one, lap complete, time stopped. Good run.', 'tower');
+    },
+    score: (ctx) => {
+      const l = ctx.data.lastTouchdown;
+      const speed = Math.max(0, 1 - ctx.elapsed / 240);
+      return Math.round(speed * 62 + (l ? l.score : 30) * 0.38);
+    },
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 6. Night Medevac — the hardest kind of ordinary flying.
+   * ------------------------------------------------------------------ */
+  {
+    id: 'medevac',
+    name: 'Night Medevac',
+    short: 'Night pickup in fog',
+    difficulty: 'Hard',
+    icon: '✚',
+    blurb:
+      'Someone is hurt on Mango Cay and the fog has come in after dark. Fly out, get down on the pad, ' +
+      'and bring them back to the airfield.',
+    reward: 'Teaches instrument flying, night approaches and staying calm in bad visibility.',
+    weather: { time: 'night', condition: 'rainy', windSpeedKts: 11, windDirDeg: 130 },
+    spawn: RUNWAY_START,
+    timeLimit: 720,
+    parTime: 480,
+    steps: [
+      {
+        id: 'go',
+        text: 'Take off and head for Mango Cay. It is dark, so fly the instruments, not the window.',
+        hint: 'The attitude indicator is your horizon now. Keep the wings level on it.',
+        atc: { text: 'Skylark one seven two, medical flight, cleared for immediate departure runway zero nine.', voice: 'tower' },
+        check: (ctx) => ctx.ac.airborneTime > 4 && ft(ctx.ac.agl) > 250,
+      },
+      {
+        id: 'out',
+        text: 'Fly out to the cay. Keep at least 800 feet — there is high ground you cannot see.',
+        hint: 'Trust the altimeter. If it says 800 you are at 800, whatever the dark looks like.',
+        targetLabel: 'Mango Cay',
+        target: () => DELIVERY_PAD.clone(),
+        check: (ctx) => ctx.ac.pos.distanceTo(DELIVERY_PAD) < 900,
+      },
+      {
+        id: 'pickup',
+        text: 'Get down on the pad. Slowly — you cannot see much and there is nowhere else to go.',
+        hint: 'Full flaps, low power, and let it settle. Below 300 feet per minute.',
+        targetLabel: 'Landing pad',
+        target: () => DELIVERY_PAD.clone(),
+        check: (ctx) =>
+          ctx.ac.onGround &&
+          ctx.ac.groundSpeed < 3 &&
+          ctx.ac.pos.distanceTo(DELIVERY_PAD) < 260 &&
+          !!ctx.data.lastTouchdown &&
+          !ctx.data.lastTouchdown.crashed,
+      },
+      {
+        id: 'back',
+        text: 'They are aboard. Take them home — smoothly, they are hurt.',
+        hint: 'Gentle turns. Nothing steeper than 20 degrees of bank from here on.',
+        atc: { text: 'Skylark one seven two, patient aboard, returning to the field.', voice: 'pilot' },
+        targetLabel: 'Runway 09',
+        target: () => RUNWAY.thresholdWest.clone().add(new THREE.Vector3(-1500, 160, 0)),
+        check: (ctx) =>
+          ctx.ac.pos.x < RUNWAY.thresholdWest.x - 300 &&
+          ctx.ac.pos.x > RUNWAY.thresholdWest.x - 4200 &&
+          Math.abs(ctx.ac.pos.z) < 900,
+      },
+      {
+        id: 'land',
+        text: 'Land. Gently — this is the bit that matters.',
+        hint: 'Aim for less than 200 feet per minute at touchdown.',
+        targetLabel: 'Touchdown zone',
+        target: () => RUNWAY.touchdown,
+        check: landedAndStopped,
+      },
+    ],
+    onComplete: (ctx) => {
+      ctx.sim.speak('Skylark one seven two, ambulance is on the apron. Thank you — that was good flying.', 'tower');
+    },
+    score: (ctx) => {
+      const l = ctx.data.lastTouchdown;
+      // A smooth arrival matters more here than a fast one.
+      const gentle = l ? Math.max(0, 1 - Math.abs(l.vsFpm) / 600) : 0.3;
+      return Math.round((l ? l.score : 30) * 0.6 + gentle * 40);
+    },
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 7. Storm Chaser — get close to a tornado without being eaten by it.
+   * ------------------------------------------------------------------ */
+  {
+    id: 'chaser',
+    name: 'Storm Chaser',
+    short: 'Tornado research',
+    difficulty: 'Very hard',
+    icon: '🌪',
+    blurb:
+      'A tornado is on the ground and the science people want readings from close to it. Fly three passes ' +
+      'through the outer bands — close enough to matter, far enough to live.',
+    reward: 'Teaches flying an aeroplane that is not going where you point it.',
+    weather: { time: 'day', condition: 'stormy', windSpeedKts: 26, windDirDeg: 240 },
+    spawn: { pos: new THREE.Vector3(-4200, ELEV + 520, 600), headingDeg: 90, speed: 70, altAGL: 520 },
+    timeLimit: 420,
+    parTime: 320,
+    steps: [
+      {
+        id: 'find',
+        text: 'There is a tornado on the ground ahead. Find it — the marker on the HUD points the way.',
+        hint: 'It is rated on the Enhanced Fujita scale. Whatever it says, treat it with respect.',
+        atc: { text: 'Skylark one seven two, tornado is on the ground, confirmed. Readings when able.', voice: 'tower' },
+        enter: (ctx) => {
+          // A middling one: dangerous, survivable, and it will not sit still.
+          ctx.sim.tornadoEF = 2;
+          ctx.sim.triggerNatural('tornado');
+        },
+        check: (ctx) => ctx.sim.tornado.active && ctx.sim.tornado.proximity(ctx.ac.pos) > 0.25,
+      },
+      {
+        id: 'passes',
+        text: 'Three passes through the outer band. Get close — but stay out of the core.',
+        hint: 'The wind will try to turn you into it. Lead your turns and never let it get behind you.',
+        targetLabel: 'Tornado',
+        target: (ctx) => (ctx.sim.tornado.active ? ctx.sim.tornado.pos.clone().setY(ELEV + 400) : null),
+        enter: (ctx) => {
+          ctx.data.passes = 0;
+          ctx.data.inBand = false;
+        },
+        check: (ctx) => {
+          const t = ctx.sim.tornado;
+          if (!t.active) return false;
+          const near = t.proximity(ctx.ac.pos);
+          // A pass is entering the band and coming out the other side alive.
+          if (!ctx.data.inBand && near > 0.55) ctx.data.inBand = true;
+          else if (ctx.data.inBand && near < 0.3) {
+            ctx.data.inBand = false;
+            ctx.data.passes = (ctx.data.passes || 0) + 1;
+            ctx.sim.hud.notify(`Reading ${ctx.data.passes} of 3 recorded`, 'good', 3);
+          }
+          return (ctx.data.passes || 0) >= 3;
+        },
+      },
+      {
+        id: 'home',
+        text: 'That is all three. Get away from it and land — the weather is not improving.',
+        hint: 'Put it behind you and do not look back.',
+        targetLabel: 'Runway 09',
+        target: () => RUNWAY.touchdown,
+        check: landedAndStopped,
+      },
+    ],
+    failIf: (ctx) => {
+      // Going into the core is not bravery, it is the end of the aeroplane.
+      if (ctx.sim.tornado.active && ctx.sim.tornado.bite(ctx.ac.pos) > 0.75) {
+        return 'You flew into the core';
+      }
+      return null;
+    },
+    onComplete: (ctx) => {
+      ctx.sim.speak('Skylark one seven two, readings received. Nobody expected you to get all three.', 'tower');
+    },
+    score: (ctx) => {
+      const l = ctx.data.lastTouchdown;
+      return Math.round(50 + (l ? l.score : 20) * 0.5);
     },
   },
 ];

@@ -94,6 +94,11 @@ export class Input {
     // Smoothed control outputs.
     this.out = { pitch: 0, roll: 0, yaw: 0, throttle: 0, brakes: 0 };
     this.throttleTarget = 0;
+    /**
+     * Set by the on-screen controls on a touch device. Left null when there is
+     * no touch layer, so a keyboard flight never pays for this.
+     */
+    this.touch = null;
 
     this._onKeyDown = (e) => {
       // Let the browser handle typing, but only for things you actually type
@@ -132,7 +137,11 @@ export class Input {
       if (!this.mouseEnabled && !this.rightDown && !this.freeLook) return;
       const dx = e.movementX || 0;
       const dy = e.movementY || 0;
-      if (this.rightDown || (this.freeLook && !this.mouse.locked)) {
+      // Holding the right button looks around — but only when free look is
+      // actually on. It used to work regardless, so with the setting off a
+      // right-drag still swung your head, which is precisely the "free look is
+      // on even though it should be off" complaint.
+      if ((this.freeLook && (this.rightDown || !this.mouse.locked))) {
         this.lookYaw = clamp(this.lookYaw - dx * 0.0035, -2.4, 2.4);
         this.lookPitch = clamp(this.lookPitch - dy * 0.0035, -1.0, 0.75);
         this._lookIdle = 0;
@@ -279,10 +288,29 @@ export class Input {
         this.lookYaw = lerp(this.lookYaw, 0, back);
         this.lookPitch = lerp(this.lookPitch, 0, back);
       }
-    } else if (!this.rightDown) {
-      // Not looking around: spring back promptly.
+    } else {
+      /*
+       * Free look is off, so the head always comes back to straight ahead.
+       *
+       * This used to be skipped while the right button was held, and nothing
+       * re-centred when the setting was switched off — so turning free look
+       * off while your head was turned left you stuck staring at the side
+       * window with no way back short of restarting. Off means off.
+       */
       this.lookYaw = lerp(this.lookYaw, 0, clamp(dt * 3, 0, 1));
       this.lookPitch = lerp(this.lookPitch, 0, clamp(dt * 3, 0, 1));
+      if (Math.abs(this.lookYaw) < 0.002) this.lookYaw = 0;
+      if (Math.abs(this.lookPitch) < 0.002) this.lookPitch = 0;
+    }
+
+    // On-screen controls. They add to the keyboard rather than replacing it,
+    // so a tablet with a keyboard attached can use either at any moment.
+    if (this.touch) {
+      if (this.touch.stickHeld) {
+        rollIn = clamp(rollIn + this.touch.roll, -1, 1);
+        pitchIn = clamp(pitchIn + this.touch.pitch, -1, 1);
+      }
+      if (this.touch.rudderHeld) yawIn = clamp(yawIn + this.touch.yaw, -1, 1);
     }
 
     // Mouse flying overrides the keyboard when it is moving.
@@ -337,6 +365,9 @@ export class Input {
 
     // Throttle: held keys ramp it, gamepad triggers set it.
     if (padThrottle !== null) this.throttleTarget = padThrottle;
+    if (this.touch && this.touch.throttle !== null && this.touch.throttle !== undefined) {
+      this.throttleTarget = this.touch.throttle;
+    }
     // The arrow keys belong to the throttle until free look claims them, so
     // check the modifier keys separately from the shared arrows.
     const throttleKey = (action, arrows) => {
@@ -352,7 +383,10 @@ export class Input {
     if (throttleKey('throttleDown', arrowsFree)) this.throttleTarget = clamp(this.throttleTarget - dt * 0.62, 0, 1);
     this.out.throttle = lerp(this.out.throttle, this.throttleTarget, clamp(dt * 6, 0, 1));
 
-    const braking = this.held('brakes') || (this.padEdges && this.padEdges.brakes);
+    const braking =
+      this.held('brakes') ||
+      (this.padEdges && this.padEdges.brakes) ||
+      !!(this.touch && this.touch.brakes);
     this.out.brakes = lerp(this.out.brakes, braking ? 1 : 0, clamp(dt * 9, 0, 1));
 
     return this.out;
