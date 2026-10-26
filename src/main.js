@@ -1,0 +1,5578 @@
+/**
+ * Island Flight Simulator — entry point.
+ *
+ * Owns the renderer, the world, the game state machine and the frame loop.
+ * Physics runs at a fixed 120 Hz in sub-steps so the flight model behaves the
+ * same on a 60 Hz laptop and a 144 Hz monitor.
+ */
+
+import * as THREE from './vendor/three.module.js';
+
+import { warmTextures, setTextureAnisotropy, setTextureTier, asphaltTexture, asphaltNormal } from './render/textures.js';
+import { resetSurfaces, updateSurfaces, setFieldWetness } from './render/surfaces.js';
+import { PostFX } from './render/post.js';
+import { pickTier, probeFrames, isTier, tierRank, asHighMs } from './render/quality-probe.js';
+import { DynamicResolution, pixelRatioCap } from './render/dyn-res.js';
+import { setPaintTier } from './render/paint.js';
+import { Weather } from './world/weather.js';
+import { SkyDome } from './world/sky.js';
+import { createTerrain, heightAt, AIRPORT, applyMap, MAP, clearObstacles, clearPlatforms, harbourBerth, harbourMouth, flatSurfaceAt } from './world/terrain.js';
+import { SeaMarks } from './world/seamarks.js';
+import { MAPS, getMap, mapsForGame } from './world/maps.js';
+import { clearPads, nearestPad, PADS } from './world/pads.js';
+import { buildRoads, onRoad, roadRibbon, roadSurfaceProbe, nearestRoadPoint } from './world/roads.js';
+import { Carrier } from './world/carrier.js';
+import { chooseBerth as chooseCarrierBerth } from './world/carrier-berth.js';
+import { SurfaceVehicle, VEHICLES, setTerrainProbes } from './vehicles/surface.js';
+import { DriveInput, DriveCamera, DRIVE_VIEW_LABELS, installDriveTouch } from './vehicles/driving.js';
+import { createBoat, createCar, updateVehicleModel } from './vehicles/models.js';
+// BLENDER MODELS: the helicopter, van and launch from tools/blender/.
+import { preloadVehicleModels } from './vehicles/blender-models.js';
+import { Ocean } from './world/water.js';
+import { Airport, RUNWAY, refreshRunways } from './world/airport.js';
+import { Scenery, DELIVERY_PAD } from './world/scenery.js';
+import { MapFeatures } from './world/features.js';
+import { Apron, refreshApronElevation } from './world/apron.js';
+import { CloudField } from './world/clouds.js';
+import { Rain } from './world/precip.js';
+
+import { Aircraft, EVENTS, UNITS, SPEC, applyAircraft } from './aircraft/physics.js';
+import { getAircraft, specFor, isHelicopter } from './aircraft/types.js';
+import { createAircraftModel, syncAircraftModel, crashAircraftModel, clampSinking, eyeFor, groundOffsetFor, setFleetModels } from './aircraft/model-adapter.js';
+import { setModelQuality } from './aircraft/model-quality.js';
+import { createCockpit } from './aircraft/cockpit.js';
+import { TouchControls, isTouchDevice } from './ui/touch.js';
+
+import { Input, keyLabel, HELI_MAP, BOAT_MAP, actionsFor, CONTEXT_GROUP, ACTIONS, codesFor } from './flight/input.js';
+import { reverseDetent } from './flight/controllers.js';
+import { mountControllersPanel } from './ui/controllers-panel.js';
+import { CameraRig, VIEW_LABELS, CHASE_BACK, CHASE_UP, chaseScaleFor } from './flight/camera.js';
+
+import { GameAudio } from './audio/index.js';
+
+import { Hud } from './ui/hud.js';
+import { BoatHud } from './ui/hud-boat.js';
+import { DriveHud } from './ui/hud-drive.js';
+import { installRotorHud } from './ui/hud-rotor.js';
+import { Menus } from './ui/menus.js';
+import { installGameUi } from './ui/game-ui.js';
+
+/** The four games, in the order the switcher shows them. */
+const GAME_IDS = ['flight', 'boat', 'car', 'heli'];
+
+import { MissionRunner, STATUS } from './game/runner.js';
+import { MISSIONS, findMission, FREE_FLIGHT, RUNWAY_START, missionsFor, gameOf, FREE_FOR, missionStartFuel } from './game/missions.js';
+import { withRole, currentRole } from './game/roles/roles.js';
+import { BOAT_MISSIONS, BOAT_PATROL, findBoatMission, boatSpawnFor, clearBoatProps } from './game/missions-boat.js';
+import { CAR_JOBS, findJob, jobsFor, lengthNote, ISLAND_ROADS, IslandRoads, resolveSpawn } from './game/jobs.js';
+import { clearHeliProps, heliFreeStart } from './game/missions-heli.js';
+import { TUTORIAL } from './game/tutorial.js';
+import { AtcDirector } from './game/atc-director.js';
+import { CargoCrate, PracticeBomb } from './game/markers.js';
+import { NavGuide } from './game/navguide.js';
+import { Beacon } from './game/beacon.js';
+import { nextDensity, DENSITY_WORDS } from './ui/conditions.js';
+import { Minimap } from './ui/minimap.js';
+import { Pursuer } from './game/pursuer.js';
+import * as Prog from './game/progression.js';
+import { schemeFor, findLivery } from './aircraft/liveries.js';
+import { TaxiRun } from './game/taxi.js';
+import { Wreck } from './game/wreck.js';
+import { Tornado } from './world/tornado.js';
+import { NATURAL_EVENTS, findEvent, poolForMap, severityForMap } from './game/disasters.js';
+import { Autopilot } from './flight/autopilot.js';
+
+import {
+  loadSettings,
+  saveSettings,
+  loadProgress,
+  saveProgress,
+  recordLanding,
+  recordMission,
+  resetAll,
+} from './core/storage.js';
+import { clamp } from './core/noise.js';
+import { setReduceFlashing, shakeClock } from './render/flash-safety.js';
+import { setComicEffects } from './render/comic.js';
+import { extInstall, extBuildWorld, extUpdate, extCamera, extStartMode, extStop, extensions, extKeyContext, extHudAction, extTouchState } from './game/extensions.js';
+// Every plug-in feature registers itself on import. See ./features/index.js.
+import './features/index.js';
+import { noteLiftoff, noteTouchdown, noteArrested, noteCeiling, noteMissionComplete } from './features/achievements/index.js';
+import { viewScale as airlinerViewScale } from './features/airliners.js';
+import { __airportServices } from './features/airport-services.js';
+
+const KTS = UNITS.KTS;
+const FT = UNITS.FT;
+const FPM = UNITS.FPM;
+
+/**
+ * The key a touch sheet presses for an action: the player's first binding,
+ * or the default when they have unbound it (a button with nothing behind it
+ * is worse than one that does what it says).
+ */
+function firstCodeFor(action) {
+  const codes = codesFor(action);
+  if (codes && codes.length) return codes[0];
+  const a = ACTIONS[action];
+  return a && a.default && a.default[0] ? a.default[0] : null;
+}
+
+/** Bumped whenever the game changes. Printed on boot so you can tell at a
+ *  glance whether a browser is running a stale cached copy. */
+export const BUILD = 'v28 — a plug-in layer, so the wishlist can be built in parallel';
+
+const loadEl = document.getElementById('loading');
+const loadBar = document.getElementById('load-bar');
+const loadMsg = document.getElementById('load-msg');
+const loadTip = document.getElementById('load-tip');
+
+const TIPS = [
+  'Shift adds power, Ctrl takes it away.',
+  'Two white and two red PAPI lights means you are on the perfect glide path.',
+  'A slow, gentle pull on S lifts you off — never yank it.',
+  'In a crosswind, point the nose slightly into the wind to stay lined up.',
+  'Press C to look at your aeroplane from outside.',
+  'Runway 09 means you land heading 090 degrees — east.',
+  'If the stall warning sounds, lower the nose and add power.',
+];
+
+function setLoad(pct, msg) {
+  if (loadBar) loadBar.style.width = `${Math.round(pct * 100)}%`;
+  if (msg && loadMsg) loadMsg.textContent = msg;
+}
+
+function fatal(message, detail) {
+  const box = document.getElementById('fatal');
+  if (!box) return;
+  box.hidden = false;
+  box.innerHTML = `<h2>Something went wrong</h2><p>${message}</p>${
+    detail ? `<pre>${String(detail).slice(0, 900)}</pre>` : ''
+  }<p class="tiny">Try reloading the page. If it keeps happening, your browser may not support WebGL 2 —
+  Chrome, Edge, Firefox and Safari 16+ all do.</p>`;
+  if (loadEl) loadEl.hidden = true;
+}
+
+class Game {
+  constructor() {
+    this.settings = loadSettings();
+    // Before anything builds an aeroplane, say which set of models to use.
+    setFleetModels(this.settings.fleetModels);
+    // ...and which tier it is built for (the heat haze behind a jet is High and up).
+    setModelQuality(this.settings.quality);
+    // Before anything flashes. On unless the player has switched it off.
+    setReduceFlashing(this.settings.reduceFlashing !== false);
+    // Off unless the player has switched Comic effects on.
+    setComicEffects(this.settings.comicEffects === true);
+    this.progress = loadProgress();
+    this.state = 'loading';
+    this.mode = null;
+    this.clock = new THREE.Clock();
+    this._tmpV = new THREE.Vector3();
+    this.acc = 0;
+    this.fpsFrames = 0;
+    this.fpsTime = 0;
+    this.fps = 0;
+    this.papiHint = null;
+    this.cloudImmersion = 0;
+    this.activeTarget = null;
+    /** The aircraft carrying you when you are a passenger, not a pilot (the President's seat); else null. */
+    this.riding = null;
+    this._armed = false;
+    this._storesLeft = 0;
+    this.hasCargo = false;
+    this.crate = null;
+    this.qualityBuilt = null;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Boot                                                                */
+  /* ------------------------------------------------------------------ */
+
+  async boot() {
+    if (loadTip) loadTip.textContent = TIPS[Math.floor(Math.random() * TIPS.length)];
+
+    const canvas = document.getElementById('view');
+    try {
+      this.renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: this.settings.quality !== 'low',
+        powerPreference: 'high-performance',
+        stencil: false,
+      });
+    } catch (err) {
+      fatal('This browser could not start WebGL, which the simulator needs to draw 3D graphics.', err);
+      return;
+    }
+    /*
+     * Ultra.
+     *
+     * Everything that was capped for the sake of a school laptop, uncapped:
+     * the full device pixel ratio rather than two, four-thousand-pixel
+     * shadows, denser terrain, more trees, more cloud, more rain, and the
+     * highest anisotropy the card will give — which is what actually stops a
+     * runway turning to mush at a shallow angle, and is free on anything made
+     * this decade.
+     *
+     * It is not the default and never will be: the class flies this on iPads.
+     */
+    const q = this.settings.quality;
+    // Dynamic resolution (render/dyn-res.js): the tier's cap times a scale
+    // that drops while the frame rate is low and recovers when it is not.
+    this.dynRes = new DynamicResolution();
+    this.renderer.setPixelRatio(pixelRatioCap(q, window.devicePixelRatio));
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.shadowMap.enabled = this.settings.quality !== 'low';
+    // The cockpits cut the exterior's insides away from a camera inside them
+    // with clipping planes on the materials (aircraft/cockpit/kit.js
+    // carveFromInside); a material without planes costs nothing for this.
+    this.renderer.localClippingEnabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // Only the renderer knows what the card will give. See setTextureAnisotropy.
+    try {
+      setTextureAnisotropy(q === 'ultra' ? this.renderer.capabilities.getMaxAnisotropy() : 4);
+    } catch (e) {
+      /* a card that will not answer keeps the safe default */
+    }
+    // Bloom and the colour grade (render/post.js). Switched on per tier by
+    // buildWorld; its targets only exist while it is on (High and Ultra).
+    this.post = new PostFX(this.renderer);
+    // The aeroplanes' paint: clearcoat on High and Ultra (render/paint.js).
+    setPaintTier(q);
+    // The texture sizes follow the tier (render/textures.js setTextureTier):
+    // set before anything is drawn, so nothing is drawn twice.
+    setTextureTier(q);
+    resetSurfaces(q);
+
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.1, 60000);
+
+    // BLENDER MODELS: fetched and parsed while the textures paint. Never
+    // rejects; a vehicle whose file fails keeps the model it had before.
+    const blenderModels = preloadVehicleModels();
+    setLoad(0.04, 'Painting textures…');
+    await warmTextures((p, label) => setLoad(0.04 + p * 0.5, `Painting ${label.toLowerCase()}…`));
+
+    setLoad(0.56, 'Raising the islands…');
+    await this.frame();
+    this.weather = new Weather();
+    this.weather.load(this.settings.weather);
+    this.weather.setRandomWinds(!!this.settings.randomWinds);
+    // A gust is worth calling out — it is the difference between a good
+    // landing and a bounce, and you cannot see wind.
+    this.weather.onGust = (kts, dirDeg) => {
+      if (this.state !== 'flying' || !this.hud) return;
+      const rel = ((dirDeg - (this.aircraft.readouts().heading || 0) + 540) % 360) - 180;
+      const side =
+        Math.abs(rel) < 35 ? 'head-on' : Math.abs(rel) > 145 ? 'from behind' : rel < 0 ? 'from the left' : 'from the right';
+      this.hud.notify(`Gust ${side} — ${kts} knots`, 'warn', 2.6);
+    };
+    // Pick the saved map before anything reads the height field.
+    applyMap(this.settings.map || 'kestrel');
+    this.layRoads();
+    // The field moved. Tell the modules that cached its height.
+    refreshRunways();
+    refreshApronElevation();
+    // BLENDER MODELS: in before the world (the apron) and the first aircraft
+    // are built, but a slow disk holds the menu up 1.5 s at most.
+    await Promise.race([blenderModels, new Promise((r) => setTimeout(r, 1500))]);
+    this.buildWorld(this.settings.quality);
+
+    setLoad(0.82, 'Rolling out the aeroplane…');
+    await this.frame();
+    this.aircraft = new Aircraft();
+    this.aircraft.mode = this.settings.flightMode;
+    this.aircraft.difficulty = this.settings.difficulty || 'normal';
+    // The helicopter's stability assist: Settings > Flying, or its key in the air.
+    this.aircraft.hoverAssist = this.settings.heliAssist !== false;
+    this.aircraft.realisticFuel = !!this.settings.realisticFuel;
+    // Built with no options at all before, so it silently wore the skylark's
+    // colours whatever was saved. setAircraft rebuilds it a moment later, but
+    // one frame in the wrong paint is still one frame in the wrong paint.
+    this.model = createAircraftModel({
+      type: this.aircraftType,
+      livery: schemeFor(this.aircraftType, this.settings.livery),
+    });
+    this.scene.add(this.model);
+    this.cockpit = createCockpit({ highContrast: this.settings.highContrast, type: this.aircraftType, model: this.model });
+    this.model.add(this.cockpit);
+    this.cockpit.visible = false;
+
+    this.rig = new CameraRig(this.camera, this.aircraft);
+    this.rig.cockpitPitchDeg = (this.cockpit && this.cockpit.userData.viewPitchDeg) || 0;
+    this.rig.reducedMotion = this.settings.reducedMotion;
+
+    this.navGuide = new NavGuide(this.scene);
+    this.beacon = new Beacon(this.scene);
+    // A soft beacon over the mission's final destination (ui/ribbon.js marks
+    // it on the tape; this is the same place out of the window). Only while
+    // a mission or job gives you somewhere to go — see the guidance block.
+    this.destBeacon = new Beacon(this.scene, { soft: true });
+    this.minimap = new Minimap(document.getElementById('ui'));
+    this.minimap.toggle(this.settings.minimap !== false);
+    this.minimap.runwayLines = this.settings.runwayLines !== false;
+    if (typeof document !== 'undefined') document.documentElement.classList.toggle('no-big-warnings', !this.settings.bigWarnings);
+    // The class is applied once the HUD exists — it is built a few lines down.
+    this.prog = Prog.load();
+    this.autopilot = new Autopilot();
+    this.taxi = new TaxiRun(this);
+    this.wreck = new Wreck(this.scene);
+    this.tornado = new Tornado(this.scene);
+    this.weather.vortex = this.tornado;
+    this.navGuide.setEnabled(this.settings.guidance !== false);
+
+    setLoad(0.9, 'Warming up the radio…');
+    await this.frame();
+    this.audio = new GameAudio();
+    this.audio.radio.onSubtitle = ({ text, voice, duration }) => this.hud.setSubtitle(text, voice, duration);
+
+    this.input = new Input(canvas);
+    this.hud = new Hud(document.getElementById('ui'), { onAction: (a) => this.hudAction(a) });
+    this.syncMinimapClass();
+    // On-screen controls, only where there is no keyboard to speak of.
+    if (isTouchDevice()) {
+      this.touch = new TouchControls(this.hud.wrap, {
+        input: this.input,
+        onAction: (a) => this.hudAction(a),
+        // The sheets' hold buttons (trim, look behind) and what they show.
+        onHold: (a, down) => this.holdAction(a, down),
+        state: () => this.touchState(),
+      });
+      this.hud.wrap.classList.add('is-touch');
+      // The right-hand stack's touch layout (ui/hud.js): under the band.
+      this.hud.useTouchLayout();
+      /*
+       * Also on the root, so the MENUS can size their touch targets.
+       * `is-touch` lives on the HUD wrapper, which is not an ancestor of the
+       * menu layer, and `@media (pointer: coarse)` is not a reliable stand-in:
+       * it is false on plenty of machines that have a touchscreen.
+       */
+      document.documentElement.classList.add('is-touch-device');
+    }
+    this.hud.setSubtitlesEnabled(this.settings.subtitles);
+    this.hud.setHighContrast(this.settings.highContrast);
+    this.hud.setLargeText(this.settings.largeText);
+    // Photo is for the moment, not the next visit: a shared classroom device
+    // must not open on a HUD with no objective, no instruments and no map.
+    if (this.settings.hudDensity === 'photo') this.settings.hudDensity = 'clean';
+    this.hud.setDensity(this.settings.hudDensity);
+    document.documentElement.classList.toggle('reduce-motion', !!this.settings.reducedMotion);
+    this.syncFxTier();
+    this.hud.setMuted(this.settings.muted);
+    this.hud.setVisible(false);
+
+    this.runner = new MissionRunner(this);
+    this.runner.onStep = (step, i, total) => this.onMissionStep(step, i, total);
+    this.runner.onComplete = (r) => this.onMissionComplete(r);
+    this.runner.onFail = (f) => this.onMissionFail(f);
+    this.runner.onEvent = (e) => this.onMissionEvent(e);
+
+    this.atc = new AtcDirector(this);
+    this.bindAircraftEvents();
+
+    /** Which of the four games the menus are showing. */
+    this.game = 'flight';
+    /*
+     * The map each game was last played on.
+     *
+     * Four games with different places: the lifeboat's island is not the
+     * courier's and neither is the aeroplane's. One shared `settings.map` sent
+     * you back to whichever you used last, whatever you were about to do.
+     */
+    this.gameMap = {};
+    this.menus = new Menus(document.getElementById('ui'), {
+      // The Rotors page's Tutorial is the helicopter's first lesson, not the aeroplane school.
+      startTutorial: () => (this.game === 'heli' ? this.startAnyMission('firstlight') : this.startMode('tutorial')),
+      /*
+       * One door for all four games.
+       *
+       * The mission cards call this hook, and it sent everything to
+       * startMode() — which flies an aeroplane. A boat mission or a car job
+       * clicked from the grid would have started an aeroplane on the boat's
+       * map with the boat's objective on the HUD.
+       */
+      startMission: (id) => this.startAnyMission(id),
+      startFree: (opts) => this.startMode('free', opts),
+      onSetting: (path, value) => this.applySetting(path, value),
+      onPauseAction: (a) => this.pauseAction(a),
+      onTrigger: (kind) => this.toggleFailure(kind),
+      onNatural: (id) => this.triggerNatural(id),
+      onLocked: (msg) => this.hud.notify(msg, 'warn', 5),
+      startDrive: (kind) => this.launchDrive(kind),
+      // The multiplayer feature cannot put a button on the main menu itself;
+      // this is the door it exports (src/features/multiplayer.js).
+      openMultiplayer: () => import('./features/multiplayer.js')
+        .then((m) => m.openMultiplayer(this))
+        .catch((err) => { console.error('[multiplayer] could not open', err); this.hud.notify('Multiplayer could not open — see the console', 'warn', 4); }),
+      // A Dev-mode button a plug-in feature offered. It runs with the game in
+      // hand; whatever it starts, it starts from the menu like anything else.
+      runDevAction: (a) => {
+        try { a.run(this); } catch (err) { console.error(`[ext] ${a.ext}: ${a.label} failed`, err); this.hud.notify(`${a.label} failed — see the console`, 'warn', 4); }
+      },
+      switchGame: (id) => this.switchGame(id),
+      onAutopilotAlt: (ft) => {
+        // Tell it to climb or descend. Used by "hold" and by the level change —
+        // returning to the field and lining up both set their own heights.
+        this.autopilot.setSelectedAlt(ft);
+        if (this.autopilot.engaged) {
+          this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+          this.hud.notify(`Autopilot to ${ft.toLocaleString()} ft`, 'info', 2.4);
+        }
+      },
+      onAutopilotHeading: (deg) => {
+        const r = this.autopilot.setSelectedHeading(deg);
+        if (this.autopilot.engaged) {
+          this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+          this.hud.notify(
+            r.applied
+              ? `Autopilot turning to ${String(r.heading).padStart(3, '0')}°`
+              : `Heading saved — it works out its own while ${r.why === 'field' ? 'returning to the field' : 'lining up'}`,
+            'info',
+            2.6
+          );
+        } else {
+          this.hud.setAutopilotBugs(this.autopilot);
+        }
+      },
+      onAutopilotSpeed: (kt) => {
+        this.autopilot.setSelectedSpeed(kt);
+        if (this.autopilot.engaged) {
+          this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+          this.hud.notify(`Autopilot holding ${kt} kt`, 'info', 2.4);
+        } else {
+          this.hud.setAutopilotBugs(this.autopilot);
+        }
+      },
+      onAutopilotVs: (fpm) => {
+        this.autopilot.setSelectedVs(fpm);
+        if (this.autopilot.engaged) {
+          this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+          this.hud.notify(`Climb and descent at ${fpm.toLocaleString()} ft/min`, 'info', 2.4);
+        } else {
+          this.hud.setAutopilotBugs(this.autopilot);
+        }
+      },
+      onAutopilotMode: (id) => {
+        this.autopilot.setMode(id);
+        // Choosing a job for it is also asking it to do the job.
+        if (!this.autopilot.engaged) this.toggleAutopilot(true);
+        else this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+        const m = {
+          hold: 'holding heading and height',
+          level: `on its way to ${Math.round(this.autopilot.selectedAltFt).toLocaleString()} ft`,
+          field: 'returning to the airfield',
+          approach: 'lining up with runway 09',
+        }[id];
+        this.hud.notify(`Autopilot ${m}`, 'info', 3.5);
+      },
+      getBindings: () => this.input.bindings,
+      captureKey: (action, done) => this.input.capture(action, done),
+      // Settings → Controls: the next key (null for Esc), who else has it,
+      // put it on, every clash there is, and which game's group goes first.
+      listenKey: (done) => this.input.listen(done),
+      cancelListen: () => this.input.cancelCapture(),
+      keyClashes: (action, code) => this.input.clashes(action, code),
+      bindKey: (action, code, opts) => this.input.bind(action, code, opts),
+      keyConflicts: () => this.input.conflicts(),
+      keyGroup: () => this.keyGroup(),
+      resetKeys: (group) => this.input.resetBindings(group),
+      resetAll: () => {
+        resetAll();
+        location.reload();
+      },
+      onScreen: (name) => {
+        if (name === 'missions' && this.game === 'car' && this.refreshJobBoard) this.refreshJobBoard();
+      },
+      chooseMap: (id) => {
+        // Remembered per game. The four games have different places and a child
+        // who picks Sennen for the lifeboat should not find the aeroplane there
+        // next time, nor the van sent back to Kestrel when they take a job.
+        this.gameMap[this.game || 'flight'] = id;
+        return this.setMap(id);
+      },
+      install: () => this.promptInstall(),
+      toggleSound: () => {
+        this.hudAction('mute');
+        this.menus.syncSound(this.settings.muted);
+        if (!this.settings.muted) this.unlockAudio();
+      },
+      onClick: () => this.audio.available && this.audio.alerts.uiClick(),
+    });
+
+    /*
+     * Four games, one menu.
+     *
+     * Every screen in here was written for an aeroplane: the map cards say how
+     * long the runway is, the mission grid is twelve aeroplane missions and the
+     * hangar picks aircraft. This fits the same screens to whichever game is
+     * selected — its own missions, its own maps, its own words — rather than
+     * building four menus that would drift apart by the end of the week.
+     *
+     * `mapQualifies` is injected rather than decided inside the menu because
+     * only the thing that builds the world knows the answer: the car's test is
+     * "has this map got roads", and that is a question for the map data.
+     */
+    installGameUi(this.menus, {
+      onFreeDrive: (gameId) => {
+        if (gameId === 'boat' || gameId === 'car') return this.launchDrive(gameId);
+        return this.switchGame(gameId);
+      },
+      startMission: (id) => this.startAnyMission(id),
+      mapQualifies: (gameId, m) => {
+        if (!m) return false;
+        if (m.game) return m.game === gameId;
+        if (gameId === 'boat') return !!(m.waters && m.waters.harbour);
+        if (gameId === 'car') return !!(m.waters && m.waters.roads && m.waters.roads.length);
+        return true;
+      },
+    });
+    for (const g of ['flight', 'boat', 'car', 'heli']) {
+      this.menus.registerMissions(g, missionsFor(g));
+    }
+    /*
+     * And the courier's board tells the truth about this island.
+     *
+     * jobs.js works out, per map, which of the six can actually be done — the
+     * lighthouse job needs a lighthouse you can drive to, the summit job needs
+     * a hill with a road up it — and hands back a reason for each refusal. None
+     * of that ever reached a player: the board built a clickable card for all
+     * six on every map, so a child could take Coast Road on an island whose
+     * lighthouse is across open water and drive until the clock ran out.
+     */
+    this.refreshJobBoard = () => {
+      const screen = this.menus.screens.missions;
+      if (!screen) return;
+      let entries;
+      try {
+        entries = jobsFor(this);
+      } catch (err) {
+        return; // a board that cannot be graded is better than no board
+      }
+      for (const e of entries) {
+        const card = screen.querySelector(`[data-mission="${e.job.id}"]`);
+        if (!card) continue;
+        card.classList.toggle('is-unavailable', !e.available);
+        const btn = card.querySelector('[data-start]');
+        if (btn) btn.disabled = !e.available;
+        let why = card.querySelector('[data-job-why]');
+        if (!why) {
+          why = document.createElement('p');
+          why.className = 'mission-why';
+          why.setAttribute('data-job-why', '');
+          card.appendChild(why);
+        }
+        why.textContent = e.available ? e.note || '' : e.why || 'Not on this island';
+        why.hidden = !why.textContent;
+      }
+    };
+
+    /*
+     * ONE progression object, shared with the menus.
+     *
+     * Menus reads its own copy at construction so the hangar can paint itself,
+     * and the hangar's buttons mutate that copy in place. If main.js kept a
+     * separate one, entering the passcode would unlock the menus' copy and
+     * leave main.js's at false for the rest of the session — which is exactly
+     * what happened. This has to run AFTER `new Menus(...)`; an earlier
+     * attempt sat above it and was dead code, because `this.menus` did not
+     * exist yet and the `if` simply never fired.
+     */
+    /*
+     * The menus read live settings for the things they paint: the fleet card
+     * liveries, and the dev-mode switches. This was never assigned, so
+     * `settingsRef` was permanently undefined and the fleet art always painted
+     * house colours however the aeroplane was actually painted.
+     */
+    this.menus.settingsRef = this.settings;
+    this.prog = this.menus.prog;
+    this.menus.syncProgression && this.menus.syncProgression(this.prog);
+    this.menus.syncFleetLocks && this.menus.syncFleetLocks();
+    this.menus.syncMissionLocks && this.menus.syncMissionLocks();
+    this.menus.syncSettings(this.settings);
+    this.menus.syncProgress(this.progress);
+    this.menus.syncSound(this.settings.muted);
+    this.menus.syncMap(this.settings.map || 'kestrel');
+    this.input.freeLook = !!this.settings.freeLook;
+    this.menus.syncFreeLook(this.input.freeLook);
+    // Settings → Controls → Controllers: the sim gear's own page (ui/controllers-panel.js).
+    try {
+      const host = this.menus.screens.settings && this.menus.screens.settings.querySelector('[data-controllers]');
+      if (host) this.controllersPanel = mountControllersPanel(host, this.input.controllers);
+    } catch (e) {
+      console.warn('Controllers panel did not mount', e);
+    }
+
+    window.addEventListener('resize', () => this.onResize());
+    window.addEventListener('pointerdown', () => this.unlockAudio(), { once: false });
+    window.addEventListener('keydown', () => this.unlockAudio(), { once: false });
+    // Pause when the player switches tabs — nobody wants to come back to a
+    // smoking crater. The flag exists so the automated self-test can opt out.
+    this.autoPauseOnHide = true;
+    document.addEventListener('visibilitychange', () => {
+      if (this.autoPauseOnHide && document.hidden && this.state === 'flying') this.pause();
+    });
+
+    // Graphics "Auto", first boot only: time the real frame behind the
+    // loading screen and drop to a lighter tier if this computer needs one.
+    //
+    // Not in an automated browser (navigator.webdriver: the headless Chrome
+    // the test suites drive, each with a fresh profile). There the probe
+    // would time frames on a Mac shared with other test Chromes and could
+    // pick Medium or Low at random, so every browser suite would run at a
+    // tier nobody chose. They keep High, the tier they were written against,
+    // as loading-screens.js skips its pictures for them. `?autoq=1` runs the
+    // probe anyway, to test this path itself.
+    const automated = typeof navigator !== 'undefined' && navigator.webdriver && !/[?&]autoq=1\b/.test(location.search);
+    if (this.settings.qualityAuto && !this.settings.qualityAutoPicked && !automated) {
+      setLoad(0.97, 'Checking what this computer can draw…');
+      await this.frame();
+      try {
+        this.autoQualityAtBoot();
+      } catch (err) {
+        console.warn('[quality] the Auto probe failed; keeping', this.settings.quality, err);
+      }
+    }
+
+    setLoad(1, 'Ready for take-off');
+    await this.frame();
+    if (loadEl) {
+      // Take it out of the document entirely rather than just hiding it. It
+      // sits above the interface, so if anything ever leaves it on screen — a
+      // stalled transition, a stale stylesheet — you get a black sheet over
+      // the whole game and no way to dismiss it. An element that is gone
+      // cannot do that.
+      loadEl.classList.add('is-done');
+      loadEl.hidden = true;
+      setTimeout(() => loadEl.remove(), 600);
+    }
+
+    this.state = 'menu';
+    this.menus.show('main');
+    this.setupPwa();
+    this.aircraft.reset({ ...RUNWAY_START, engineOn: true });
+    // The plug-in features. Each is fenced off from the others and from the
+    // game: one that throws is switched off, never allowed to stop the loop.
+    extInstall(this);
+    this.loop();
+
+    console.info(`[island-flight] build ${BUILD}`);
+    this.checkForStuckOverlays();
+    // Small headless API so the flight model can be driven in tests.
+    window.__sim = this;
+    window.__build = BUILD;
+  }
+
+  /**
+   * Yield one frame so the loading bar can paint. Browsers pause
+   * requestAnimationFrame entirely in a background tab, so race it against a
+   * timer — otherwise loading would stall until the tab was brought forward.
+   */
+  frame() {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      requestAnimationFrame(finish);
+      setTimeout(finish, 80);
+    });
+  }
+
+  /**
+   * Run something after the next paint, whether or not the browser feels like
+   * giving us a frame. Same race as `frame()`: requestAnimationFrame stops in
+   * a background tab and while a native <select> dropdown is open, and work
+   * that never runs is indistinguishable from a crash.
+   */
+  afterPaint(fn) {
+    let done = false;
+    const go = () => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+    requestAnimationFrame(go);
+    setTimeout(go, 120);
+  }
+
+  /**
+   * What the tyres are told they are on.
+   *
+   * The road wins where there is a road, and where there is not, the map's own
+   * authored ground does — a quay is tarmac, a causeway is gravel, a village
+   * green is grass. `flatSurfaceAt` has read that field since the flats landed
+   * and was never once passed to the vehicle, so a stretch a map's own blurb
+   * calls gravel drove as tarmac where a road crossed it and as grass
+   * everywhere else. Measured on the Sands Causeway: eleven samples, six
+   * tarmac, five grass, gravel at none of them.
+   */
+  surfaceProbe(roads) {
+    const onRoads = roadSurfaceProbe(roads);
+    return (x, z) => {
+      const r = onRoads(x, z);
+      if (r) return r;
+      const kind = flatSurfaceAt(x, z);
+      return kind ? { kind } : null;
+    };
+  }
+
+  /**
+   * The map this game should be played on.
+   *
+   * A car job with no map of its own used to start wherever you happened to be
+   * — which after one flight is Kestrel, an island with one road along its
+   * waist and nothing for a courier to do. The boat had the same problem in
+   * reverse. So: the map you last chose for THIS game, or the first one built
+   * for it, and only fall back to where you are if the game has nowhere of its
+   * own.
+   */
+  mapForGame(game) {
+    const chosen = this.gameMap[game];
+    if (chosen && getMap(chosen).id === chosen) return chosen;
+    const own = MAPS.filter((m) => m.game === game);
+    if (own.length) return own[0].id;
+    const offered = mapsForGame(game);
+    return offered.length ? offered[0].id : this.settings.map;
+  }
+
+  /**
+   * Lay the roads, once per map.
+   *
+   * A road is a cut through the terrain, so it has to exist before the terrain
+   * mesh is built or the mesh and the ground the car drives on disagree. And
+   * it has to be worked out AFTER applyMap, because the router reads the
+   * height field it is about to change.
+   *
+   * Only maps that name places get roads. The nine flight maps have no road
+   * network and are not supposed to: driving there is the free drive it has
+   * always been, on the apron and the grass.
+   */
+  layRoads() {
+    const map = MAP;
+    this.roads = null;
+    /*
+     * And publish the harbour, which is the boat's equivalent of the runway.
+     *
+     * missions-boat.js asks for `sim.harbour` and, not finding one, falls back
+     * to walking out from the origin until it reaches open water — and then
+     * CACHES that answer on the sim for the rest of the session. So every boat
+     * mission started at the same invented anchorage two kilometres out,
+     * whatever map it had just loaded and wherever that map's quay actually
+     * was. terrain.js has known the answer since the harbours landed; nothing
+     * was handing it over.
+     */
+    /*
+     * The tyres hear about the ground on EVERY map, not only the ones with
+     * roads. The probe used to be installed inside the road branches, so on a
+     * map with no network the quay, the causeway and the village green all
+     * came back as whatever the height-based guess said.
+     */
+    setTerrainProbes({ surfaceAt: this.surfaceProbe(null) });
+
+    const berth = harbourBerth();
+    const mouth = harbourMouth();
+    this.harbour = berth && mouth
+      ? {
+          berth: new THREE.Vector3(berth.x, 0, berth.z),
+          mouth: new THREE.Vector3(mouth.x, 0, mouth.z),
+          name: (map && map.waters && map.waters.harbour && map.waters.harbour.name) || 'the harbour',
+        }
+      : null;
+    // And drop the stale fallback, or the cache outlives the map it was for.
+    this._boatFallbackHarbour = null;
+    if (!map || !map.courier) {
+      /*
+       * A map may have authored its own network — several of the driving maps
+       * did, a street grid among them — and an authored road is better than a
+       * generated one because somebody decided where it should go. Publish it
+       * so the tyres and the chart can see it, and generate nothing.
+       */
+      const authored = map && map.waters && map.waters.roads;
+      if (authored && authored.length) {
+        this.roads = { list: authored, roads: authored, notes: [], place: () => null, places: [] };
+        setTerrainProbes({ surfaceAt: this.surfaceProbe(authored) });
+      }
+      return;
+    }
+    try {
+      const t0 = performance.now();
+      /*
+       * Generate only where nothing was authored. Two of the driving maps
+       * carry both a place list and their own roads; regenerating over the top
+       * of those would throw away a network somebody drew on purpose.
+       */
+      const authored = map.waters && map.waters.roads;
+      const already = authored && authored.length && !map.waters._generated;
+      const { roads, notes } = already ? { roads: authored, notes: ['authored'] } : buildRoads(map);
+      map.waters = map.waters || {};
+      map.waters.roads = roads;
+      if (!already) map.waters._generated = true;
+      // The bounding boxes and the harbour siting are resolved once and cached
+      // on the waters block; a new road list has to invalidate that.
+      delete map.waters._ready;
+      applyMap(map);
+      /*
+       * The shape jobs.js asks for.
+       *
+       * It looks for `sim.roads.place(name)` and falls back to "the apron is
+       * the depot" when there is not one — a placeholder its own comment says
+       * to replace the day a road network exists. This is that day: the places
+       * come from the map, and every delivery now has a real address on a real
+       * road instead of six jobs that all start and end on the same apron.
+       */
+      /*
+       * And tell the car. surface.js deliberately takes its road knowledge by
+       * injection rather than importing world/ — a vehicle that imports the
+       * terrain is a vehicle that cannot be tested without one. Without this
+       * the van drives on a tarmac road that reads as grass, at 40 km/h.
+       */
+      setTerrainProbes({ surfaceAt: this.surfaceProbe(roads) });
+      const places = (map.courier && map.courier.places) || [];
+      this.roads = {
+        list: roads,
+        // The chart asks for `.roads`; the jobs ask for `.place()`; the tyres
+        // ask for a plain list. One object, three names, no copies.
+        roads,
+        notes,
+        place(name) {
+          const p = places.find((q) => q.id === name || q.kind === name);
+          return p ? { x: p.x, z: p.z } : null;
+        },
+        places,
+      };
+      const km = roads.reduce((a, r) => {
+        let l = 0;
+        for (let i = 1; i < r.path.length; i++) {
+          l += Math.hypot(r.path[i][0] - r.path[i - 1][0], r.path[i][1] - r.path[i - 1][1]);
+        }
+        return a + l;
+      }, 0) / 1000;
+      console.debug(
+        `[roads] ${map.id}: ${roads.length} roads, ${km.toFixed(1)} km in ` +
+          `${(performance.now() - t0).toFixed(0)} ms`,
+        notes.length ? notes : ''
+      );
+    } catch (err) {
+      // A map with no drivable ground is a map with no roads, not a black
+      // screen. The car can still be driven on it; it just has nowhere to go.
+      console.warn('Could not lay the roads on this map:', err);
+      this.roads = null;
+    }
+  }
+
+  /** Is this point on made road? What the tyres and the chart ask. */
+  onRoad(x, z, margin = 0) {
+    return onRoad(this.roads && this.roads.list, x, z, margin);
+  }
+
+  /**
+   * Tear the old world down properly. Removing a group from the scene only
+   * unhooks it — the geometry, materials and textures stay resident on the
+   * GPU. That is fine once, but the world is rebuilt every time the graphics
+   * quality or the map changes, and leaked render targets are exactly what
+   * used to make the sea flicker after a long session.
+   */
+  disposeWorld() {
+    if (!this.worldGroups) return;
+    const seen = new Set();
+    const killTex = (m) => {
+      for (const k of ['map', 'normalMap', 'roughnessMap', 'alphaMap', 'emissiveMap', 'aoMap', 'bumpMap']) {
+        const t = m[k];
+        if (t && t.isTexture && !seen.has(t)) {
+          seen.add(t);
+          t.dispose();
+        }
+      }
+      m.dispose();
+    };
+    for (const g of this.worldGroups) {
+      if (!g) continue;
+      g.traverse((o) => {
+        if (o.geometry && !seen.has(o.geometry)) {
+          seen.add(o.geometry);
+          o.geometry.dispose();
+        }
+        const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+        for (const m of mats) {
+          if (seen.has(m)) continue;
+          seen.add(m);
+          killTex(m);
+        }
+      });
+      this.scene.remove(g);
+    }
+    if (this.sky && this.sky.dispose) this.sky.dispose();
+    this.worldGroups = null;
+  }
+
+  buildWorld(quality) {
+    // The whole build in one go, as it always was: run the steps to the end.
+    const steps = this.buildWorldSteps(quality);
+    while (!steps.next().done);
+  }
+
+  /**
+   * The same build, stopping between its pieces so a loading screen can paint.
+   *
+   * buildWorld() holds the main thread for the whole of it, so a screen that
+   * said "Shaping the land…" could not be seen until the land was shaped.
+   * `onStep({ at, of, label })` is told what is ABOUT to be built, and a
+   * frame is given before it is. The frame loop skips drawing while this
+   * runs: half a world is not a picture.
+   */
+  async buildWorldStaged(quality, onStep) {
+    this._worldBuilding = true;
+    try {
+      for (const step of this.buildWorldSteps(quality)) {
+        if (onStep) onStep(step);
+        await this.frame();
+      }
+    } finally {
+      this._worldBuilding = false;
+    }
+  }
+
+  /**
+   * Fly to another map the way a flight that borrows one does (the map you
+   * chose is put back by restoreChosenMap), building it in stages. False when
+   * it is already the map.
+   */
+  async borrowMapStaged(id, onStep) {
+    const want = getMap(id).id;
+    if (!want || this.settings.map === want) return false;
+    if (!this.mapBeforeMission) this.mapBeforeMission = this.settings.map;
+    applyMap(want);
+    this.layRoads();
+    refreshRunways();
+    refreshApronElevation();
+    this.settings.map = want;
+    this.menus.syncMap(want);
+    await this.buildWorldStaged(this.settings.quality, onStep);
+    return true;
+  }
+
+  *buildWorldSteps(quality) {
+    const STEPS = 15;
+    let at = 0;
+    const next = (label) => ({ at: at++, of: STEPS, label });
+    yield next('Clearing the last map…');
+    this.disposeWorld();
+    // Timing each piece makes it obvious which part of the world is
+    // expensive if someone changes the detail settings later.
+    const t = (label, fn) => {
+      const t0 = performance.now();
+      const r = fn();
+      console.debug(`[world] ${label} ${Math.round(performance.now() - t0)} ms`);
+      return r;
+    };
+
+    console.debug('[world] build start', quality);
+    // Solid structures are registered as each piece builds itself, so the list
+    // has to start empty or a rebuild would leave ghost buildings behind to
+    // crash into.
+    clearObstacles();
+    // Decks you can land on are registered the same way, and for the same
+    // reason: a stale one would be a steel floor hanging over empty sea.
+    clearPlatforms();
+    // Pads are cleared by buildPads itself, but a map with no pads at all
+    // would otherwise inherit the previous map's list if Scenery ever failed
+    // to construct. One line, and the failure mode it removes is "a pad
+    // hanging in the air over a different island".
+    clearPads();
+    yield next('Painting the sky…');
+    this.sky = t('sky', () =>
+      new SkyDome(this.scene, {
+        shadows: quality !== 'low',
+        shadowMapSize: quality === 'ultra' ? 4096 : quality === 'high' ? 2048 : 1024,
+        camera: this.camera,
+        // The dome's own halo round the sun is turned down where bloom draws one.
+        glow: quality === 'high' || quality === 'ultra' ? 0.55 : 1,
+      })
+    );
+    // Bloom and grade: High and Ultra. Off frees its targets; on makes them
+    // at the next frame, at the drawing buffer's size.
+    if (this.post) {
+      this.post.setEnabled(false);
+      this.post.setEnabled(quality === 'high' || quality === 'ultra');
+    }
+    setPaintTier(quality);
+    // Glass, cladding and tarmac (render/surfaces.js): the tier decides whether
+    // they reflect the sky's environment map or Low's analytic one, and the
+    // registry of the old world's materials is dropped here.
+    setTextureTier(quality);
+    resetSurfaces(quality);
+    yield next('Filling the sea…');
+    this.ocean = t('ocean', () => new Ocean(this.scene, quality));
+    yield next('Laying the runway…');
+    this.airport = t('airport', () => new Airport(this.scene));
+    // The terminal, the air bridges, the parked aeroplanes and the vehicles.
+    yield next('Building the airfield…');
+    this.apron = t('apron', () => new Apron(this.scene, quality));
+    /*
+     * The roads, here, between the airfield and the ground it stands on.
+     *
+     * They used to be laid before buildWorld ran at all, which meant the
+     * router was routing over an obstacle list that had just been emptied:
+     * it knew the shape of the island and nothing about what was built on
+     * it. On Drover's Flat the depot–airfield road went straight through the
+     * terminal, and the van — driven by the test harness's own pure pursuit,
+     * and by any child who follows the tarmac — stopped dead against the
+     * wall at waypoint 20 of 23. Laid here, the tower and the terminal are
+     * already registered and the road goes round them.
+     *
+     * And before `createTerrain`, which is the other half of it: roadHeight
+     * is part of heightAt, so the mesh has to be built after the paths exist
+     * or the graded corridor under the tarmac is the one from last time.
+     * Nothing between here and there reads this.terrain — the height
+     * function is analytic and owes the mesh nothing.
+     */
+    yield next('Shaping the land…');
+    this.layRoads();
+    this.terrain = t('terrain', () => createTerrain(this.scene, quality));
+    yield next('Planting the scenery…');
+    this.scenery = t('scenery', () => {
+      const sc = new Scenery(this.scene, quality);
+      // Something on the apron to measure the base against — see parkJets().
+      sc.parkJets(createAircraftModel, getAircraft('nightjar'), schemeFor(getAircraft('nightjar'), 'house'));
+      return sc;
+    });
+    /*
+     * The carrier, parked off the coast.
+     *
+     * Placed on a cardinal heading on purpose — the landing surface is an
+     * axis-aligned box, so an angled ship would have a deck that did not match
+     * the picture, and falling through a deck you were aiming at is far worse
+     * than a ship that happens to point north.
+     */
+    yield next('Anchoring the carrier…');
+    this.carrier = t('carrier', () => {
+      const at = this.carrierBerth();
+      const c = new Carrier(this.scene, {
+        x: at.x, z: at.z, headingDeg: 0, name: 'CV-11 Resolute',
+      });
+      // Something on the deck to measure the ship against.
+      c.parkAircraft(createAircraftModel, getAircraft('osprey'), schemeFor(getAircraft('osprey'), 'house'));
+      return c;
+    });
+    // Whatever makes this particular map the place it says it is: lava, reef,
+    // farmland, waterfalls, the aurora.
+    /*
+     * The tarmac. The corridor under it was cut at map load; this is the
+     * surface on top. One mesh for the whole network.
+     */
+    if (this.roadMesh) {
+      this.scene.remove(this.roadMesh);
+      this.roadMesh.geometry.dispose();
+      this.roadMesh = null;
+    }
+    yield next('Laying the roads…');
+    if (this.roads && this.roads.list.length) {
+      this.roadMesh = t('roads', () =>
+        roadRibbon(THREE, this.roads.list, { tex: asphaltTexture(), nrm: asphaltNormal() })
+      );
+      if (this.roadMesh) this.scene.add(this.roadMesh);
+    }
+    yield next('Raising the landmarks…');
+    this.features = t('features', () => new MapFeatures(this.scene, quality));
+    // Broken water over the drying shoals. Builds nothing on a map with none,
+    // which is every map that has not been given shoals of its own.
+    yield next('Marking the channels…');
+    this.seamarks = t('seamarks', () => new SeaMarks(this.scene, quality));
+    yield next('Gathering the clouds…');
+    this.clouds = t('clouds', () => new CloudField(this.scene, quality));
+    // Distant clouds fade into the sky's own fog, haze toward a low sun included.
+    this.clouds.viewFog = this.sky.viewFog;
+    yield next('Checking the weather…');
+    this.rain = t('rain', () => new Rain(this.scene, quality));
+    // Image-based lighting from the sky. Do this after the world exists so the
+    // aeroplane, sea and buildings all pick it up.
+    //
+    // Not on Low. The environment map is a cube render plus a filter chain at
+    // build time, again every couple of seconds as the sky changes, and a
+    // handful of extra texture reads in every lit pixel of the frame. Low
+    // takes the fallback the sky already has for a card that cannot make one:
+    // no environment, and the hemisphere light at its full strength in its
+    // place (sky.js update(): envReady stays false).
+    yield next('Lighting the world…');
+    if (quality === 'low') {
+      this.scene.environment = null;
+    } else {
+      try {
+        this.sky.buildEnvironment(this.renderer, this.scene);
+      } catch (err) {
+        console.warn('Could not build the environment map:', err);
+      }
+    }
+
+    this.worldGroups = [
+      this.sky.mesh,
+      this.terrain,
+      this.ocean.group,
+      this.airport.group,
+      this.apron.group,
+      this.scenery.group,
+      this.carrier.group,
+      this.features.group,
+      this.seamarks.group,
+      this.clouds.group,
+      this.rain.mesh,
+    ];
+    if (this.roadMesh) this.worldGroups.push(this.roadMesh);
+    yield next('Finishing touches…');
+    this.worldGroups.push(...extBuildWorld(this, THREE));
+    this.qualityBuilt = quality;
+    console.debug('[world] build complete');
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Events                                                              */
+  /* ------------------------------------------------------------------ */
+
+  bindAircraftEvents() {
+    const ac = this.aircraft;
+    ac.on(EVENTS.TOUCHDOWN, (g) => {
+      const impact = clamp(Math.abs(g.vsFpm) / 700, 0.05, 1);
+      this.audio.available && this.audio.ambience.playTouchdown(impact, g.paved ? 'paved' : 'grass');
+      this.rig.kick(0.25 + impact * 0.6);
+      if (g.crashed) return;
+      this.progress = recordLanding(this.progress, g);
+      this.menus.syncProgress(this.progress);
+      /*
+       * The touchdown card (ui/touchdown.js): the rate of descent at the
+       * moment the wheels touched, a grade word, stars, and your best in this
+       * aeroplane. It replaces the "Perfect landing! · 85/100" banner, which
+       * said the same number in a sentence nobody read twice.
+       */
+      this.hud.showTouchdown(g, this.aircraftType);
+      this.audio.available && (g.quality === 'rough' ? this.audio.alerts.uiBack() : this.audio.alerts.checkpoint());
+      this.atc.onTouchdown(g);
+      const wind = this.weather.windDescription(RUNWAY.headingDeg);
+      noteTouchdown(this, g, {
+        crosswindKts: wind.cross,
+        night: this.weather.isNight,
+        stormy: this.weather.windSpeedKts >= 20 || /storm|rain/i.test(this.weather.condition || ''),
+      });
+    });
+
+    ac.on(EVENTS.LIFTOFF, (d) => {
+      this.progress.takeoffs++;
+      saveProgress(this.progress);
+      this.hud.showBanner('Airborne!', `Lift-off at ${Math.round(d.speedKts)} knots — well flown.`, 'good', 3);
+      this.audio.available && this.audio.alerts.checkpoint();
+      noteLiftoff(this, d);
+    });
+
+    ac.on(EVENTS.CRASH, (c) => {
+      /*
+       * Did the brace work?
+       *
+       * If you shut everything down and then flew it properly — wings level,
+       * slow, and settling rather than diving — the aeroplane is wrecked and
+       * everybody is fine. That is what the procedure is FOR, and it is what
+       * actually happens in the real ditchings people remember.
+       *
+       * Judged on the state at the moment of impact, not on where you ended
+       * up, because holding it off to the last second is the skill.
+       */
+      // A mayday owns its own ending — see resolveBrace().
+      if (this.bracing || this.braceRescueT) this.braceOwnsEnding = true;
+      this.progress.crashes++;
+      saveProgress(this.progress);
+      if (this.audio.available) {
+        if (this.aircraft.pos.y < 3 && heightAt(this.aircraft.pos.x, this.aircraft.pos.z) < 0)
+          this.audio.ambience.playSplash();
+        else this.audio.ambience.playCrash();
+        this.audio.engine.playStop();
+      }
+      this.rig.kick(1.4);
+      // Something to look at. A crash used to leave the aeroplane sitting
+      // there in one piece, which read as the game having frozen rather than
+      // as having gone badly wrong.
+      const inWater = heightAt(ac.pos.x, ac.pos.z) < 0 && ac.pos.y < 4;
+      this.wreck.start(ac.pos, ac.vel, inWater);
+      // And, if this aeroplane is one that can come apart, let it.
+      crashAircraftModel(
+        this.model,
+        ac,
+        {
+          reason: c.reason,
+          // The part that actually touched, and how fast it was going before
+          // the physics damped the wreck to stop it sliding.
+          worldPoint: c.contact && c.contact.worldPoint,
+          partId: c.contact && c.contact.part,
+          worldVelocity: c.impactVel,
+          worldAngularVelocity: c.impactOmega,
+          surfaceKind: (c.contact && c.contact.surfaceKind) || (inWater ? 'water' : undefined),
+        },
+        { groundHeight: heightAt, camera: this.camera }
+      );
+      // A mayday writes its own words. "Crashed" is not one of them: you
+      // declared an emergency, the aeroplane came down and people came for
+      // you, and calling that a crash reads as being told off for it.
+      // …and nor is "Crashed" the word when you were not in it: out on foot or under a canopy,
+      // the eject feature says what happened to the empty aeroplane, in its own words.
+      const outOfIt = (() => {
+        try {
+          const k = extKeyContext(this);
+          return k === 'foot' || k === 'chute';
+        } catch (e) {
+          return false;
+        }
+      })();
+      if (!this.bracing && !this.braceRescueT && !outOfIt) {
+        this.hud.showBanner('Crashed', c.reason, 'bad', 6);
+      }
+      /*
+       * The debrief is deliberately late, so the wreck is worth watching
+       * first. But restarting inside those 2.2 seconds used to drop the crash
+       * debrief on top of the new flight — the timer had no idea it had been
+       * overtaken. It is tracked and cancelled now, and it checks that the
+       * flight it fires into is still the crashed one.
+       */
+      clearTimeout(this._crashDebriefT);
+      const crashedFlight = this.progress.flights;
+      this._crashDebriefT = setTimeout(() => {
+        if (this.state === 'flying' && this.aircraft.crashed && this.progress.flights === crashedFlight) {
+          this.showCrashDebrief(c.reason);
+        }
+      }, 2200);
+    });
+
+    ac.on(EVENTS.DAMAGE, (d) => {
+      if (!d.worsened) return;
+      const WORDS = {
+        leftWing: 'Left wing',
+        rightWing: 'Right wing',
+        nose: 'Nose',
+        tail: 'Tail',
+        fuselage: 'Fuselage',
+        gear: 'Undercarriage',
+      };
+      const how = d.level > 0.7 ? 'badly damaged' : d.level > 0.35 ? 'damaged' : 'scraped';
+      this.hud.notify(`${WORDS[d.part] || d.part} ${how} — keep flying`, 'warn', 4.5);
+      this.hud.setDamage(ac.damage);
+      this.rig.kick(0.5 + d.severity);
+      this.audio.available && this.audio.alerts.caution && this.audio.alerts.caution();
+    });
+
+    ac.on(EVENTS.ARRESTED, (d) => {
+      this.hud.showBanner('Trapped!', `Caught a wire at ${Math.round(d.speedKts)} knots.`, 'good', 3);
+      this.rig.kick(0.9);
+      this.audio.available && this.audio.ambience.playGear(true);
+      noteArrested(this);
+    });
+
+    // The top of the sky (aircraft/physics.js): a calm line, never a banner —
+    // this is not an emergency, it is just as high as the sky goes.
+    ac.on(EVENTS.CEILING, () => {
+      this.hud.notify('Top of the sky — 70,000 ft', 'info', 4);
+      noteCeiling(this);
+    });
+
+    ac.on(EVENTS.GEAR, (d) => {
+      this.audio.available && this.audio.ambience.playGear(d.down);
+      this.hud.notify(d.down ? 'Landing gear coming down' : 'Landing gear coming up', 'info', 2.6);
+    });
+    ac.on(EVENTS.ENGINE_START, () => {
+      this.audio.available && this.audio.engine.playStart();
+      this.hud.notify('Starting the engine…', 'info', 2.4);
+    });
+    ac.on(EVENTS.ENGINE_STOP, (d) => {
+      this.audio.available && this.audio.engine.playStop();
+      this.hud.notify(d.reason === 'fuel' ? 'The engine stopped — out of fuel!' : 'Engine off', 'warn', 5);
+    });
+    // A wing's stall already has the HUD's STALL slab in the middle of the
+    // screen (and the warnings' row after it): the same words as a notice
+    // too was the third time. The helicopter has no slab, so it keeps it.
+    ac.on(EVENTS.STALL, () => {
+      if (!SPEC.rotor) return;
+      this.hud.notify('Stall! Lower the nose and add power', 'bad', 3.5);
+    });
+    ac.on(EVENTS.OVERSPEED, () => {
+      this.audio.available && this.audio.alerts.overspeed();
+      this.hud.notify('Too fast! Reduce power and level off', 'bad', 3.5);
+    });
+    ac.on(EVENTS.FUEL_LOW, () => {
+      this.audio.available && this.audio.alerts.lowFuel();
+      this.hud.notify('Low fuel — head back to the airfield', 'warn', 6);
+    });
+  }
+
+  onMissionStep(step, i, total) {
+    // Every mission gets an intensity curve for free: the music is told which
+    // step began and shapes itself from the scene's own table. See music.js.
+    if (this.audio.available && this.settings.music && step && step.id) {
+      this.audio.music.setPhase(step.id);
+    }
+    const title = this.runner.def.name + (total > 1 ? ` · step ${i + 1} of ${total}` : '');
+    this.hud.setObjective(title, step.text);
+    if (i > 0) this.audio.available && this.audio.alerts.checkpoint();
+  }
+
+  onMissionEvent(e) {
+    if (e.type === 'checkpoint') {
+      this.audio.available && this.audio.alerts.checkpoint();
+      this.hud.notify(
+        e.remaining > 0 ? `Ring passed! ${e.remaining} to go` : 'Last ring — nicely flown!',
+        'good',
+        2.6
+      );
+    } else if (e.type === 'hint') {
+      this.hud.notify(`Hint: ${e.text}`, 'info', 6);
+    }
+  }
+
+  onMissionComplete(result) {
+    const isTutorial = result.id === 'tutorial';
+    if (isTutorial) {
+      this.progress.tutorialComplete = true;
+      saveProgress(this.progress);
+    } else if (result.id !== 'free') {
+      this.progress = recordMission(this.progress, result.id, { score: result.score, time: result.time });
+    }
+    /*
+     * Pay for the flight. Missions pay most, a free flight pays a little, and
+     * a crash pays nothing — but never takes anything away, because charging
+     * someone for crashing punishes exactly the person who most needs to keep
+     * trying.
+     */
+    const before = Prog.rankFor(this.prog).id;
+    /*
+     * The mission that was flown decides the most it can pay — its difficulty
+     * and its heading (progression.js, "WHAT A MISSION PAYS"). The runner's
+     * def is that mission; findMission() is the fallback for one that has
+     * already been swapped out.
+     */
+    const flown = this.runner.def && this.runner.def.id === result.id ? this.runner.def : findMission(result.id);
+    const paid = Prog.award(this.prog, {
+      kind: result.id === 'free' ? 'free' : result.id === 'tutorial' ? 'tutorial' : 'mission',
+      score: result.score || 0,
+      crashed: !!result.crashed,
+      difficulty: this.settings.difficulty || 'normal',
+      label: result.name || result.id,
+      mission: flown,
+      game: flown ? gameOf(flown) : undefined,
+    });
+    const after = Prog.rankFor(this.prog);
+    {
+      // Achievements: mission categories, gold medals, Air Force One's two
+      // seats. Free Flight and the tutorial are not "a mission" for this —
+      // no category, no Captain/President seat — but they still count
+      // towards the flight-count milestones, the same as any finish.
+      const isMission = result.id !== 'free' && result.id !== 'tutorial';
+      const baseId = flown && (flown.baseId || flown.id);
+      const seat = isMission && (baseId === 'afo-normal' || baseId === 'afo-attack') ? (flown.roleId || 'captain') : null;
+      noteMissionComplete(this, {
+        category: isMission ? Prog.categoryOfMission(flown || {}) : null,
+        score: result.score || 0,
+        crashed: !!result.crashed,
+        afo: seat === 'president' ? 'president' : seat === 'captain' ? 'captain' : null,
+      });
+    }
+    if (paid.credits > 0) this.hud.notify(`+${paid.credits} credits · ${paid.total} total`, 'good', 4);
+    if (after.id !== before) this.hud.notify(`Promoted — you are now a ${after.name}`, 'good', 6);
+    this.menus.syncProgression && this.menus.syncProgression(this.prog);
+
+    this.menus.syncProgress(this.progress);
+    this.audio.available && this.audio.alerts.success();
+    const mins = Math.floor(result.time / 60);
+    const secs = Math.round(result.time % 60);
+    const l = result.landing;
+    const body = `
+      <div class="debrief-score">${result.score}<span>/100</span></div>
+      <ul class="debrief-list">
+        <li>Time <b>${mins}m ${String(secs).padStart(2, '0')}s</b></li>
+        ${l ? `<li>Touchdown <b>${Math.abs(l.vsFpm)} ft/min</b> (${l.quality})</li>` : ''}
+        ${l ? `<li>Landing score <b>${l.score}/100</b></li>` : ''}
+        ${l && l.onRunway ? `<li>Distance from centreline <b>${l.centreline} m</b></li>` : ''}
+        ${Prog.debriefPayRow(paid)}
+      </ul>
+      <p>${isTutorial ? 'You have finished flight school — you are cleared for solo flight!' : 'Mission complete. Try it again for a better score, or take on another one.'}</p>
+    `;
+    const actions = [
+      { label: 'Fly again', onClick: () => this.restart(), primary: true },
+      { label: 'Missions', onClick: () => this.quitToMenu('missions') },
+      { label: 'Main menu', onClick: () => this.quitToMenu('main') },
+    ];
+    this.state = 'debrief';
+    this.hud.setVisible(false);
+    this.menus.showDebrief({
+      title: isTutorial ? 'Flight school complete!' : 'Mission complete!',
+      kind: 'good',
+      body,
+      actions,
+      // For a debrief that rebuilds the body in its own words (the van's,
+      // jobs.js) and still has to say what the run paid.
+      paid,
+    });
+  }
+
+  onMissionFail(f) {
+    this.audio.available && this.audio.alerts.failure();
+    this.state = 'debrief';
+    this.hud.setVisible(false);
+    this.menus.showDebrief({
+      title: 'Mission not completed',
+      kind: 'bad',
+      body: `<p class="debrief-reason">${f.reason}</p><p>Everybody walks away in this simulator. Have another go — you get better every time.</p>`,
+      actions: [
+        { label: 'Try again', onClick: () => this.restart(), primary: true },
+        { label: 'Missions', onClick: () => this.quitToMenu('missions') },
+        { label: 'Main menu', onClick: () => this.quitToMenu('main') },
+      ],
+    });
+  }
+
+  showCrashDebrief(reason) {
+    // The mayday sequence is already writing an ending; do not talk over it.
+    if (this.braceOwnsEnding) {
+      this.braceOwnsEnding = false;
+      return;
+    }
+    if (this.braceSaved) {
+      this.braceSaved = false;
+      this.bracing = false;
+      this.state = 'debrief';
+      this.hud.setVisible(false);
+      this.menus.showDebrief({
+        title: 'Everyone walked away',
+        kind: 'good',
+        body:
+          '<p class="debrief-reason">You shut it down, kept the wings level and held it off.</p>'
+          + '<p>The aeroplane is a write-off. Nobody is hurt. That is the whole job.</p>',
+        actions: [
+          { label: 'Reset on the runway', onClick: () => this.restart(), primary: true },
+          { label: 'Main menu', onClick: () => this.quitToMenu('main') },
+        ],
+      });
+      return;
+    }
+    if (this.runner.status === STATUS.RUNNING || this.runner.status === STATUS.FAILED) return;
+    this.state = 'debrief';
+    this.hud.setVisible(false);
+    this.menus.showDebrief({
+      title: 'Crashed',
+      kind: 'bad',
+      body: `<p class="debrief-reason">${reason}</p><p>No harm done — this is a simulator. Reset and try again.</p>`,
+      actions: [
+        { label: 'Reset on the runway', onClick: () => this.restart(), primary: true },
+        { label: 'Main menu', onClick: () => this.quitToMenu('main') },
+      ],
+    });
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Mode control                                                        */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * What startMode() is about to fly. Asked on its own so the loading screen
+   * (features/loading-screens.js) can name the map and the aeroplane before
+   * the flight starts, from the one place that decides them.
+   */
+  defForMode(mode, opts = {}) {
+    if (mode === 'tutorial') return TUTORIAL;
+    // The seat: a mission with `roles` may be flown from another aircraft in its story (src/game/roles/roles.js).
+    if (mode === 'mission') return withRole(findMission(opts.id), opts.role ?? currentRole(opts.id)) || FREE_FLIGHT;
+    return FREE_FLIGHT;
+  }
+
+  /** What startDrive() is about to drive: the boat mission or car job, or null for a free drive. */
+  defForDrive(opts = {}) {
+    return opts.mission ? findBoatMission(opts.mission) : opts.job ? findJob(opts.job) : null;
+  }
+
+  async startMode(mode, opts = {}) {
+    await this.unlockAudio();
+    this.wakeAudio();
+    // Whatever you were driving, you are not driving it now. This is here
+    // rather than in the switcher because quitting the boat to the menu and
+    // picking Free Flight is the other way back, and it left the hull behind.
+    this.stopDrive();
+    this.mode = mode;
+    this.modeOpts = opts;
+    this.menus.hide();
+    this.hud.setVisible(true);
+    this.hud.hideControls();
+    this.hud.clearTransient();
+    this.autopilot.setEngaged(false, this.aircraft);
+    this.hud.setAutopilot(false);
+    this.taxi.stop();
+    this.wreck.clear();
+    this.tornado.clear();
+    this.hud.setGuideActive(this.navGuide.enabled);
+    this.atc.reset();
+    this.removeCrate();
+    this.hasCargo = false;
+    this.progress.flights++;
+    saveProgress(this.progress);
+    // The flight model has to be told before the first frame, and told again
+    // each flight — reset() clears the damage but not the rule.
+    this.aircraft.survivableStrikes = !!this.settings.damageModel;
+    this.hud.setDamage(null);
+    this.bracing = false;
+    this.braceOwnsEnding = false;
+    this.abandonedMission = null;
+    clearTimeout(this.braceRescueT);
+    this.braceRescueT = null;
+    this.braceRescue = [];
+    this.braceChoice = null;
+    this.hud.setEmergencyChoice(null);
+    this.clearRescue();
+    this.clearChute();
+    this.clearPursuer();
+    // Nothing from the last flight is allowed to arrive during this one.
+    clearTimeout(this._crashDebriefT);
+
+    const def = this.defForMode(mode, opts);
+
+    // Failures armed on the Free Flight screen. They wait until you are
+    // actually flying and then the clock starts, so you get to be somewhere
+    // interesting before anything happens.
+    this.armed = mode === 'free' && opts.failures ? { ...opts.failures } : {};
+    this.armedEvents = mode === 'free' && opts.events ? { ...opts.events } : {};
+    this._groundT = 0;
+    /** Natural events currently running, with the seconds left on each. */
+    this.activeEvents = {};
+    this.lightningStorm = null;
+    /*
+     * Clear the panel failure, and tell the HUD.
+     *
+     * Setting the counter to 0 was not enough: the tick below only calls
+     * setBlackout when the counter is ABOVE zero, so the class stayed on the
+     * HUD and every flight after a blackout — or after a mayday — started
+     * with dead instruments for no reason anybody could see.
+     */
+    this.instrumentBlackout = 0;
+    this.hud.setBlackout(false);
+    this._armedT = 0;
+    this._hasFlown = false;
+    // Randomised disasters: things break on their own, and worse weather makes
+    // that more likely — which is true of real aeroplanes as well.
+    this.randomDisasters = mode === 'free' && !!opts.randomDisasters;
+    // The Enhanced Fujita rating the player asked for, or null for "its own".
+    this.tornadoEF = mode === 'free' && opts.tornadoEF != null ? opts.tornadoEF : null;
+    this._disasterT = 0;
+    // First one is a long way off: the point is to be caught out once,
+    // somewhere awkward, not to be pecked to death on the climb-out.
+    this._nextDisaster = 180 + Math.random() * 240;
+
+    // Which aeroplane. Only Free Flight offers the choice — the tutorial and
+    // the missions are written around the trainer's numbers.
+    this.setAircraft(mode === 'free' ? opts.aircraft || 'skylark' : 'skylark');
+    // setAircraft returns early when the type has not changed, so the name is
+    // set here as well — otherwise flying the same aeroplane twice in a row
+    // leaves the panel blank the second time.
+    this.hud.setAircraftName(this.aircraftType.name);
+
+    /*
+     * A mission may demand a particular place and a particular aeroplane.
+     *
+     * Some of them only make sense somewhere specific — you cannot fly a
+     * volcano run without a volcano — and some are about what a given airframe
+     * is good at. Both are set before the spawn so the world underneath the
+     * aeroplane is the right one by the time it is put down on it.
+     */
+    if (def.map && this.settings.map !== def.map) {
+      /*
+       * A mission borrows the map; it does not get to keep it.
+       *
+       * This used to write the mission's map into settings and save it, so
+       * flying one military mission moved your saved map to the air base
+       * permanently — every Free Flight afterwards started there, and so did
+       * every other mission that does not name a map of its own. Nobody chose
+       * that and nothing told them it had happened.
+       *
+       * The choice you made is remembered here and put back when the flight
+       * ends.
+       */
+      this.mapBeforeMission = this.settings.map;
+      applyMap(def.map);
+      this.layRoads();
+      // The field moved. Tell the modules that cached its height.
+      refreshRunways();
+      refreshApronElevation();
+      this.settings.map = def.map;
+      this.menus.syncMap(def.map);
+      this.buildWorld(this.settings.quality);
+    }
+    /*
+     * Which aeroplane, in order of who has the strongest claim: the mission
+     * names one, or the caller asked for one, or the switcher left the
+     * helicopter selected, or you keep what you had.
+     *
+     * `aircraftType` is undefined until the first flight of the session — the
+     * front page has not chosen an aeroplane — so every read of it here has to
+     * allow for that. It did not, and pressing Heli from a cold start threw
+     * before a single frame was drawn.
+     */
+    const wantAc =
+      def.aircraft
+      || opts.aircraft
+      || (this.game === 'heli' ? 'harrier' : null)
+      || (this.aircraftType && this.aircraftType.id);
+    if (wantAc && (!this.aircraftType || this.aircraftType.id !== wantAc)) {
+      this.setAircraft(wantAc);
+      this.hud.setAircraftName(this.aircraftType.name);
+    }
+
+    // Light the right half of the switcher. The helicopter is an aircraft
+    // type rather than a mode, so the bar has to be told which one you are in.
+    this.menus.setGame(isHelicopter(this.aircraftType) ? 'heli' : 'flight');
+    // The hangar's "Recently flown" row (ui/hangar-showcase-ui.js), whatever
+    // screen started this flight — Free Flight, a mission, the story, a lobby.
+    if (this.aircraftType && this.menus.noteFlown) this.menus.noteFlown(this.aircraftType.id);
+
+    // Weather.
+    if (mode === 'free') {
+      this.weather.load(opts);
+      this.settings.weather = this.weather.serialize();
+      saveSettings(this.settings);
+    } else if (def.weather) {
+      this.weather.load(def.weather);
+    }
+    // A new flight starts with the field as wet as its weather: rain chosen
+    // on the menu has been falling for a while, and clear skies after a
+    // stormy flight are dry ones, not four minutes of drying from the last
+    // flight's storm (render/surfaces.js; the slow ramp is for weather that
+    // changes while you fly).
+    setFieldWetness((this.weather.cond && this.weather.cond.rain) || 0);
+
+    // Spawn.
+    // Starting on the stand is opt-in, so the tutorial, the missions and every
+    // existing test still begin lined up on the runway.
+    // A helicopter does not taxi from a gate; it starts on a pad (below).
+    const heliStart = !!SPEC.rotor;
+    const wantsTaxi = mode === 'free' && !heliStart && (opts.taxi ?? this.settings.startAtGate);
+    const spawn = def.spawn || RUNWAY_START;
+    const airborne = mode === 'free' ? !!opts.airborne : spawn.altAGL != null;
+    if (mode === 'free' && airborne) {
+      this.aircraft.reset({
+        pos: new THREE.Vector3(-3400, 0, 300),
+        headingDeg: 90,
+        speed: 60,
+        altAGL: 610,
+        engineOn: true,
+        fuel: opts.fuel != null ? Math.max(0.05, Math.min(1, opts.fuel)) : 1,
+      });
+      this.aircraft.controls.throttle = 0.7;
+      this.input.throttleTarget = 0.7;
+    } else {
+      this.aircraft.reset({
+        pos: spawn.pos ? spawn.pos.clone() : RUNWAY_START.pos.clone(),
+        headingDeg: spawn.headingDeg ?? 90,
+        speed: spawn.speed || 0,
+        altAGL: spawn.altAGL ?? null,
+        engineOn: spawn.engineOn !== false,
+        // Free Flight: how much fuel you asked for. A mission (and the
+        // tutorial): full tanks on the ground, AIRBORNE_START_FUEL when it
+        // starts you in the sky, or the spawn's own `fuel`. A retry comes
+        // back through here, so it starts the way the first go did.
+        fuel: mode === 'free'
+          ? (opts.fuel != null ? Math.max(0.05, Math.min(1, opts.fuel)) : 1)
+          : missionStartFuel(spawn),
+      });
+      if (spawn.speed) {
+        this.aircraft.controls.throttle = 0.65;
+        this.input.throttleTarget = 0.65;
+      } else {
+        this.input.throttleTarget = 0;
+      }
+    }
+    /*
+     * The helicopter starts on a helipad, and hears helicopter words.
+     *
+     * Measured on the unmodified build: Heli, then Free Flight, put the
+     * Skyhook on the numbers of runway 09 with "Take off from runway 09" on
+     * the panel and the tower saying "Taxi and hold". Every map has a pad by
+     * the airfield — `field`, in the map data — so that is where it goes,
+     * nose into the wind, which is how a helicopter is parked to lift... */
+    let heliPad = null;
+    if (heliStart && mode === 'free' && !airborne) {
+      /*
+       * ...when it is fit to stand on and there is room: no road drawn over
+       * it, and nothing taller than the deck near a hard point. Otherwise the
+       * next pad, or the heading with the most room. See heliFreeStart() in
+       * missions-heli.js, which has the measurements. The missions name their
+       * own pads and keep them.
+       */
+      const start = heliFreeStart(this, RUNWAY_START.pos.x, RUNWAY_START.pos.z);
+      heliPad = start ? start.pad : nearestPad(RUNWAY_START.pos.x, RUNWAY_START.pos.z);
+      if (heliPad) {
+        this.aircraft.reset({
+          pos: heliPad.pos.clone(),
+          headingDeg: start ? start.headingDeg : 90,
+          speed: 0,
+          altAGL: null,
+          engineOn: true,
+          fuel: opts.fuel != null ? Math.max(0.05, Math.min(1, opts.fuel)) : 1,
+        });
+        this.input.throttleTarget = 0;
+      }
+    }
+    if (heliStart) {
+      // The tower's runway calls — taxi and hold, cleared for take-off, final,
+      // short final, and the low-altitude alert that a helicopter setting down
+      // on a hillside pad sets off every time — are for aeroplanes.
+      for (const k of ['start', 'clearance', 'final', 'shortfinal', 'lowalt']) this.atc.said[k] = true;
+      /*
+       * And its touchdown call. Measured: every helicopter landing, perfect
+       * or not, on an H or not, was answered "that was off the runway. Are
+       * you able to taxi? Say your condition." Installed once, from here;
+       * an aeroplane still gets the tower's own line.
+       */
+      if (!this.atc._heliTouchdown) {
+        const atc = this.atc;
+        const aeroplane = atc.onTouchdown.bind(atc);
+        atc._heliTouchdown = true;
+        atc.onTouchdown = (g) => {
+          if (!SPEC.rotor) return aeroplane(g);
+          if (g.crashed) return;
+          atc.cool = 0;
+          atc.say(
+            g.quality === 'firm' || g.quality === 'rough'
+              ? `${atc.callsign}, down safely. Firm one — everybody all right in the back?`
+              : `${atc.callsign}, down safely${g.onRunway ? ' on the pad' : ''}. Nicely flown.`,
+            'tower'
+          );
+          atc.said.airborne = false;
+        };
+      }
+      if (mode === 'free') {
+        const w = this.weather;
+        const dir = String(Math.round(w.windDirDeg / 10) * 10).padStart(3, '0').split('').join(' ');
+        // "Wind 2 5 0 at 0" was the tower describing a calm (measured, the
+        // kid playtest's calm start).
+        const kts = Math.round(w.windSpeedKts);
+        this.atc.say(
+          `${this.atc.callsign}, ${this.atc.field} Tower, ${kts < 1 ? 'wind calm' : `wind ${dir} at ${kts}`}. `
+            + 'Lift when you are ready and keep clear of the runway. Call us if you are going anywhere.',
+          'tower'
+        );
+      }
+    }
+    this.aircraft.mode = this.settings.flightMode;
+    this.aircraft.difficulty = this.settings.difficulty || 'normal';
+    this.aircraft.hoverAssist = this.settings.heliAssist !== false;
+    this.input.out.throttle = this.aircraft.controls.throttle;
+    // A new flight's power is the spawn's: sim gear's thrust lever picks it up when it next moves.
+    this.input.releaseHardwareLevers();
+    this._hwSys = null;
+
+    // Camera: cockpit for the tutorial (you learn the instruments), chase otherwise.
+    this.rig.setMode(mode === 'tutorial' ? 'chase' : 'chase');
+    this.rig.reducedMotion = this.settings.reducedMotion;
+
+    /*
+     * The music follows the flight now, instead of stopping when one starts.
+     *
+     * It used to be a menu-only pad: this line killed it the moment anybody
+     * flew anywhere, so the twenty minutes a child actually spends in the
+     * game had no music at all. music.js has a scene for every mission, the
+     * tutorial, free flight and each of the other vehicles; all this has to
+     * do is name the one we are about to fly and keep it playing.
+     */
+    if (this.audio.available && this.settings.music) {
+      const scene = mode === 'mission' ? (def && def.id) || 'free' : mode === 'tutorial' ? 'tutorial' : 'free';
+      this.audio.music.setScene(scene);
+      this.audio.music.start();
+    }
+
+    if (def.steps && def.steps.length) {
+      this.runner.start(def);
+    } else {
+      this.runner.status = STATUS.IDLE;
+      this.runner.def = null;
+      this.runner.clearGates();
+      const assisted = this.aircraft.hoverAssist !== false;
+      const padName = heliPad ? heliPad.name : 'the pad';
+      this.hud.setObjective(
+        'Free Flight',
+        heliStart
+          ? airborne
+            ? 'You are already flying. Explore the islands, then set down on any H you like.'
+            : this.touch
+              ? `You are on ${padName}. Slide the lever up until she lifts, and let go to hover. The stick flies her, the strip along the bottom turns her, and the lever down brings her onto any H.`
+              : assisted
+                ? `You are on ${padName}. Hold Shift to raise the collective until she lifts, and let go to hover. W A S D fly, Q and E turn, and Ctrl brings you down onto any H.`
+                : `You are on ${padName}. Raise the collective with Shift until she lifts. The assist is off, so she is all yours. Set down on any H you like.`
+          : airborne
+            ? 'You are already flying. Explore the islands, then land back on runway 09 when you like.'
+            : 'Take off from runway 09, explore the islands, and land whenever you like.'
+      );
+    }
+
+    this.state = 'flying';
+    if (wantsTaxi) this.taxi.start();
+    this.clock.getDelta();
+    // Nobody is a passenger until a feature says so for this flight.
+    this.riding = null;
+    extStartMode(this, mode, opts);
+  }
+
+  restart() {
+    if (this.mode) this.startMode(this.mode, this.modeOpts);
+    else this.quitToMenu('main');
+  }
+
+  returnToAirport() {
+    extStop(this, 'airport');
+    this.aircraft.reset({ ...RUNWAY_START, engineOn: true });
+    this.input.throttleTarget = 0;
+    this.input.releaseHardwareLevers();
+    this._hwSys = null;
+    this.atc.reset();
+    this.removeCrate();
+    this.hud.clearTransient();
+    this.hud.notify('Back on runway 09, ready to go again.', 'info', 3.4);
+    if (this.runner.status === STATUS.RUNNING) {
+      // Restart the current mission from the top: fairer than resuming mid-step.
+      this.runner.start(this.runner.def);
+    }
+    this.restoreTakeoffConfig();
+    this.state = 'flying';
+    this.menus.hide();
+    this.hud.setVisible(true);
+  }
+
+  /**
+   * Put back the take-off configuration a flight starts in.
+   *
+   * startMode() hands each new flight to the features, and the airliners
+   * feature sets take-off flap there (10 degrees on the A320, 20 on the 747
+   * and the A380), because the jumbos cannot clear the Kestrel strip without
+   * it. 'Back to runway' (returnToAirport above) and 'Skip to runway'
+   * (taxi.skip) put the aeroplane down again with aircraft.reset(), which
+   * zeroes the flaps, and nothing set them again. Flown with the playtest's
+   * take-off after either (the inputs of tests/features/airliners.browser.js),
+   * the 747 and the A380 were not 15 m up until 1,398 and 1,369 m from brake
+   * release — 378 and 349 m past the end of the runway, where a reviewer's
+   * run hit the ground — and the A320 at 1,040. With this: 800, 776 and 850,
+   * against 806, 781 and 842 from a fresh start.
+   *
+   * So both ask the airliners' own startMode hook again — the same code, so
+   * the same flap, the same stance and the same "pull back at N knots" line.
+   * Only that one hook: the others begin things in startMode (a meteor
+   * shower, a loaded bomb rack) that going back to the runway must not begin
+   * a second time. extensions() leaves out a feature that has been switched
+   * off for throwing, and the call is fenced the way extensions.js fences it.
+   */
+  restoreTakeoffConfig() {
+    const ext = extensions().find((e) => e.id === 'airliners');
+    if (!ext || typeof ext.startMode !== 'function') return;
+    try {
+      ext.startMode(this, this.mode, this.modeOpts || {});
+    } catch (e) {
+      console.warn('[airliners] could not set take-off flap again', e);
+    }
+  }
+
+  quitToMenu(screen = 'main') {
+    extStop(this, 'menu');
+    this.riding = null;
+    this.clearPursuer();
+    this.restoreChosenMap();
+    this.state = 'menu';
+    this.mode = null;
+    this.runner.status = STATUS.IDLE;
+    this.runner.clearGates();
+    // No flight, no reason to hide it; the next flight's first frame decides.
+    if (this.hud.btnBrace) this.hud.btnBrace.hidden = false;
+    this.removeCrate();
+    this.hud.setVisible(false);
+    this.hud.hideControls();
+    this.menus.syncProgress(this.progress);
+    this.menus.show(screen);
+    if (this.audio.available && this.settings.music) this.audio.music.start();
+    this.aircraft.reset({ ...RUNWAY_START, engineOn: true });
+  }
+
+  pause() {
+    if (this.state !== 'flying') return;
+    this.state = 'paused';
+    // Always a way out. If the interface is hidden for a clean shot, pausing
+    // brings it back — otherwise a player who forgets the key is stuck looking
+    // at a game with no controls and no menu.
+    if (this.hud.hidden) {
+      this.hud.setHidden(false);
+      this.hud.notify('Interface restored — press U to hide it again', 'info', 3);
+    }
+    this.menus.syncTriggers(this.mode === 'free', this.aircraft.failures);
+    this.menus.syncNatural(this.activeEvents);
+    this.menus.syncAutopilot(this.autopilot.engaged, this.autopilot.mode);
+    this.menus.syncRealisticCockpit(!!this.settings.realisticCockpit);
+    // From the setting itself, so the label can never drift out of step with
+    // what the input layer is actually doing.
+    this.input.freeLook = !!this.settings.freeLook;
+    this.menus.syncFreeLook(this.input.freeLook);
+    const r = this.aircraft.readouts();
+    this.menus.setPauseInfo(`
+      <div class="pause-grid">
+        <span>Speed<b>${Math.round(r.iasKts)} kt</b></span>
+        <span>Height<b>${(r.onGround ? 0 : Math.round(r.altFt) || 0).toLocaleString('en-GB')} ft</b></span>
+        <span>Heading<b>${String(Math.round(r.heading)).padStart(3, '0')}°</b></span>
+        <span>Fuel<b>${Math.round(r.fuelPct * 100)}%</b></span>
+        <span>Wind<b>${Math.round(this.weather.windSpeedKts)} kt</b></span>
+        <span>View<b>${VIEW_LABELS[this.rig.mode]}</b></span>
+      </div>
+    `);
+    this.menus.show('pause');
+    this.audio.available && this.audio.mixer.suspend();
+  }
+
+  resume() {
+    if (this.state !== 'paused') return;
+    this.menus.hide();
+    this.hud.setVisible(true);
+    this.state = 'flying';
+    this.clock.getDelta();
+    this.wakeAudio();
+  }
+
+  /**
+   * Un-suspend the mixer.
+   *
+   * pause() suspends it and only resume() ever brought it back, so leaving the
+   * pause screen by Restart, Return to airport or Quit left the game silent
+   * for the rest of the session — including every flight after it, with no way
+   * back short of reloading the page.
+   */
+  wakeAudio() {
+    if (this.audio.available) this.audio.mixer.resume();
+  }
+
+  pauseAction(a) {
+    if (a === 'freelook') {
+      const on = !this.settings.freeLook;
+      this.applySetting('freeLook', on);
+      this.menus.syncFreeLook(on);
+      return;
+    }
+    if (a === 'realistic') {
+      const on = !this.settings.realisticCockpit;
+      this.applySetting('realisticCockpit', on);
+      this.menus.syncRealisticCockpit(on);
+      return;
+    }
+    // Every way out of the pause screen, not just Resume.
+    this.wakeAudio();
+    if (a === 'resume') this.resume();
+    else if (a === 'restart') {
+      this.menus.hide();
+      this.restart();
+    } else if (a === 'airport') this.returnToAirport();
+    else if (a === 'quit') this.quitToMenu('main');
+  }
+
+  hudAction(a) {
+    switch (a) {
+      case 'pause':
+        this.state === 'paused' ? this.resume() : this.pause();
+        break;
+      case 'camera':
+        this.hud.notify(`View: ${VIEW_LABELS[this.rig.cycle()]}`, 'info', 1.8);
+        break;
+      case 'restart':
+        this.restart();
+        break;
+      case 'airport':
+        this.returnToAirport();
+        break;
+      case 'mute':
+        this.settings.muted = !this.settings.muted;
+        this.audio.setMuted(this.settings.muted);
+        this.hud.setMuted(this.settings.muted);
+        this.menus.syncSound(this.settings.muted);
+        saveSettings(this.settings);
+        break;
+      case 'guide':
+        this.toggleGuide();
+        break;
+      case 'autopilot':
+        this.toggleAutopilot();
+        break;
+      case 'apHdgLeft':
+        this.nudgeAutopilotHeading(-5);
+        break;
+      case 'apHdgRight':
+        this.nudgeAutopilotHeading(5);
+        break;
+      case 'apSpdDown':
+        this.nudgeAutopilotSpeed(-5);
+        break;
+      case 'apSpdUp':
+        this.nudgeAutopilotSpeed(5);
+        break;
+      case 'apVsDown':
+        this.nudgeAutopilotVs(-100);
+        break;
+      case 'apVsUp':
+        this.nudgeAutopilotVs(100);
+        break;
+      case 'skipTaxi':
+        this.taxi.skip();
+        break;
+      /*
+       * Starting the engine and letting go of a store had no on-screen route
+       * at all — both were bound to a key and nothing else. That made the
+       * tutorial's second step unreachable on an iPad, and Mango Cay Delivery
+       * and the Weapons Range unfinishable. Same behaviour as the keys, so
+       * there is one rule for what these do and not two.
+       */
+      case 'starter':
+        this.pressStarter(true);
+        break;
+      case 'drop':
+        if (!this.dropCargo()) this.hud.notify('Nothing to drop right now', 'info', 2);
+        break;
+      case 'gear':
+        // Skids: main.css hides the pad in the helicopter, and this is the
+        // same rule for whatever else might call it (see handleDiscreteInput).
+        if (SPEC.rotor) break;
+        if (!this.aircraft.toggleGear()) {
+          this.hud.notify('Too fast for the landing gear — slow down first', 'warn', 3);
+        }
+        break;
+      case 'flaps': {
+        if (SPEC.rotor) break;
+        // One button, so it walks down through the settings and wraps around.
+        const ac = this.aircraft;
+        const next = ac.flapStep() >= 3 ? 0 : ac.flapStep() + 1;
+        const set = ac.setFlaps(next);
+        this.audio.available && this.audio.ambience.playFlaps();
+        this.hud.notify(`Flaps ${set * 10}°`, 'info', 2);
+        break;
+      }
+      case 'hideUi':
+        // Cinematic view. The button disappears along with everything else, so
+        // the keyboard is the only way back — say so before it goes.
+        this.toggleHideUi();
+        break;
+      case 'help':
+        this.hud.toggleControls(this.input.bindings, keyLabel, this.helpActions());
+        break;
+      case 'hudMode':
+        this.cycleHudMode();
+        break;
+      /*
+       * The state pills' undo buttons (ui/pills.js). On a touchscreen the
+       * pill IS the control: "Parking brake on — tap to release".
+       */
+      case 'releaseBrake':
+        if (this.aircraft && this.aircraft.parkingBrake) {
+          this.aircraft.parkingBrake = false;
+          this.hud.notify('Parking brake released', 'info', 1.8);
+        }
+        break;
+      case 'stopPush':
+        if (__airportServices.S.state === 'pushback') __airportServices.stopPush(this);
+        break;
+      case 'brace':
+        this.braceForImpact();
+        break;
+      case 'minimap': {
+        const on = this.minimap.toggle();
+        // Remember it, so turning it off stays off and turning it on stays on.
+        this.settings.minimap = on;
+        saveSettings(this.settings);
+        this.syncMinimapClass();
+        // So the box in Settings matches what the J key just did.
+        this.menus.syncSettings(this.settings);
+        this.hud.notify(on ? 'Minimap on — K changes the range' : 'Minimap off', 'info', 2.2);
+        break;
+      }
+      case 'minimapRange': {
+        const span = this.minimap.cycleRange();
+        this.hud.notify(`Minimap range ${span >= 1000 ? span / 1000 + ' km' : span + ' m'}`, 'info', 1.8);
+        break;
+      }
+      case 'keys': {
+        const on = this.hud.toggleKeyMonitor();
+        this.hud.notify(
+          on ? 'Key monitor on — it shows what you are pressing' : 'Key monitor off',
+          'info',
+          2.4
+        );
+        break;
+      }
+      /*
+       * The touch screen's sheets (ui/touch.js buildSheets): the GROUND
+       * sheet's pushback direction and parking brake, the SYSTEMS sheet's
+       * assist and trim reset, and the mayday card's two answers. Each is
+       * the same rule as its key, so there is one rule and not two.
+       */
+      case 'emergencyLand':
+        this.chooseBrace('land');
+        break;
+      case 'emergencyCircle':
+        this.chooseBrace('circle');
+        break;
+      case 'heliAssist':
+        if (SPEC.rotor && this.aircraft) this.setHeliAssist(this.aircraft.hoverAssist === false, true);
+        break;
+      case 'trimReset':
+        this.input.trimInput = 0;
+        this.hud.notify('Trim back to neutral', 'info', 1.4);
+        break;
+      case 'parkingBrake': {
+        const ac = this.aircraft;
+        if (!ac || !ac.onGround) {
+          this.hud.notify('The parking brake is for the ground', 'info', 2);
+          break;
+        }
+        if (!ac.parkingBrake && ac.groundSpeed > 1.5) {
+          this.hud.notify('Stop first, then set the parking brake', 'warn', 2.4);
+          break;
+        }
+        ac.parkingBrake = !ac.parkingBrake;
+        this.hud.notify(ac.parkingBrake ? 'Parking brake on — power releases it' : 'Parking brake released', 'info', 1.8);
+        break;
+      }
+      case 'pushAuto':
+      case 'pushNoseLeft':
+      case 'pushNoseRight': {
+        const pref = a === 'pushAuto' ? 'auto' : a === 'pushNoseLeft' ? 'noseLeft' : 'noseRight';
+        __airportServices.setPushPref(pref);
+        this.hud.notify(
+          pref === 'auto' ? 'Pushback: the tug picks the way, towards the runway' : `Pushback: nose to the ${pref === 'noseLeft' ? 'left' : 'right'}`,
+          'info',
+          2
+        );
+        break;
+      }
+      default:
+        // A pill's or a sheet's action a feature owns and no key does (the
+        // lights back to auto, the reversers stowed: features/pilot-systems.js).
+        if (extHudAction(this, a)) break;
+        // A feature's action (the ground crew's P, say) from a touch sheet:
+        // pressed exactly the way its key would be, so it honours Settings.
+        if (ACTIONS[a]) {
+          const code = firstCodeFor(a);
+          if (code) this.tap(code);
+        }
+        break;
+    }
+  }
+
+  /** A touch sheet's hold button (trim, look behind): the action's key held down, then let go. */
+  holdAction(a, down) {
+    const code = firstCodeFor(a);
+    if (code) this.key(code, !!down);
+  }
+
+  /** What the touch sheets show (ui/touch.js syncSheets): the crew's state, the push's way round, the switches. */
+  touchState() {
+    const ac = this.aircraft;
+    const S = __airportServices.S;
+    return {
+      crew: S.state,
+      pushPref: S.pushPref,
+      parkingBrake: !!(ac && ac.parkingBrake),
+      autopilot: !!(this.autopilot && this.autopilot.engaged),
+      rotor: !!SPEC.rotor,
+      assist: !!(ac && ac.hoverAssist !== false),
+      brace: this.state === 'flying' && this.braceAvailable(),
+      // The features' own switches (lights, spoilers, reversers, the radio: features/pilot-systems.js).
+      ...extTouchState(this),
+    };
+  }
+
+  /** Hide the whole interface for a clean shot. U is the way back. */
+  /** The minimap follows the interface: hidden with it, faulty with it. */
+  syncMinimapChrome() {
+    if (!this.minimap) return;
+    this.minimap.setSuppressed(!!this.hud.hidden);
+    this.minimap.setFaulty(this.instrumentBlackout > 0);
+  }
+
+  /**
+   * HUD mode: Full → Clean → Photo → Full (ui/conditions.js), from the key,
+   * the dock button or a pill. The same setting as Settings → Accessibility
+   * → HUD density, so the select follows and the choice is remembered.
+   */
+  cycleHudMode() {
+    const d = nextDensity(this.settings.hudDensity || 'clean');
+    this.settings.hudDensity = d;
+    saveSettings(this.settings);
+    this.hud.setDensity(d);
+    this.menus.syncSettings(this.settings);
+    this.hud.notify(DENSITY_WORDS[d], 'info', 2.4);
+    return d;
+  }
+
+  toggleHideUi() {
+    const hidden = this.hud.toggleHidden();
+    if (!hidden) this.hud.notify('Interface back on', 'info', 1.6);
+    // Before the return. The minimap is not inside the HUD wrapper, so hiding
+    // the interface left it sitting on screen on its own.
+    this.syncMinimapChrome();
+    return hidden;
+  }
+
+  toggleGuide() {
+    const on = this.navGuide.toggle();
+    this.settings.guidance = on;
+    saveSettings(this.settings);
+    this.hud.setGuideActive(on);
+    this.hud.notify(
+      on ? 'Guidance lines on — fly between them' : 'Guidance lines off',
+      'info',
+      2.4
+    );
+    return on;
+  }
+
+  /**
+   * Autopilot. Holds the wings level and the height steady, and steers towards
+   * whatever you are supposed to be heading for. Touching the stick switches it
+   * off, exactly like the real thing — you should never have to fight it.
+   */
+  toggleAutopilot(force) {
+    // Nothing to fly on while the instruments are out.
+    if (this.instrumentBlackout > 0 && force !== false && !this.autopilot.engaged) {
+      this.hud.notify('Autopilot unavailable — instruments are out', 'warn', 3);
+      return false;
+    }
+    const want = force === undefined ? !this.autopilot.engaged : !!force;
+    if (want && this.aircraft.onGround) {
+      this.hud.notify('Autopilot needs you to be flying first', 'warn', 2.6);
+      return false;
+    }
+    const on = this.autopilot.setEngaged(want, this.aircraft);
+    this.hud.setAutopilot(on, null, this.autopilot);
+    if (on) {
+      this.hud.notify(
+        `Autopilot on — holding ${Math.round(this.autopilot.targetAltFt)} ft. Move the stick to take over.`,
+        'good',
+        4
+      );
+    } else {
+      this.hud.notify('Autopilot off — you have control', 'info', 2.4);
+    }
+    this.audio.available && this.audio.alerts.uiClick();
+    // Before the return, not after it. This line sat below `return on;` where
+    // it could never run, so pressing an autopilot button in the pause menu
+    // changed the autopilot and left every button in the menu looking exactly
+    // as it had — no FLYING tag, no highlight, nothing.
+    this.menus.syncAutopilot(this.autopilot.engaged, this.autopilot.mode);
+    return on;
+  }
+
+  /**
+   * The engine switch: the I key (`fromPad` false) or the touch pad (true).
+   *
+   * One press starts it, and one press stops it on the ground, as in every
+   * aircraft. In a helicopter in the AIR it is different, because the rotor
+   * has no glide to fall back on: measured on the Skyhook at 40 m, one I had
+   * the collective at zero inside a second and the machine at -9 m/s; I again
+   * did not save it (a restart takes 1.8 s, and 0.3 s, 1 s and 2 s later from
+   * 40 m, and 1 s later from 15 m, all ended "You came down far too fast").
+   * So in the air the key asks twice, the way the emergency key does, and
+   * the pad — which on a phone sits next to the camera pad, under the same
+   * thumb — does not do it at all: it is greyed out (ui/touch.js) and a tap
+   * says why. Nothing is refused on the ground, and no difficulty is asked.
+   */
+  pressStarter(fromPad = false) {
+    const ac = this.aircraft;
+    if (!ac.engineOn) {
+      this._starterArm = 0;
+      ac.startEngine();
+      return true;
+    }
+    if (SPEC.rotor && !ac.onGround && !ac.crashed) {
+      if (fromPad) {
+        this.hud.notify('In the air the engine stays on — land to shut it down', 'info', 2.6);
+        return false;
+      }
+      if (!(this._starterArm > 0)) {
+        this._starterArm = 3;
+        this.hud.notify('Shut the engine down in flight? Press I again within 3 s — she will come down fast', 'warn', 3);
+        return false;
+      }
+    }
+    this._starterArm = 0;
+    ac.stopEngine('shutdown');
+    return true;
+  }
+
+  /**
+   * The helicopter's stability assist on or off — hover hold, height hold and
+   * auto-level (rotor-assist.js). One saved switch; choosing a difficulty
+   * sets it (on for easy and normal, off for realistic), and F flips it.
+   */
+  setHeliAssist(on, save = true) {
+    this.settings.heliAssist = !!on;
+    if (save) saveSettings(this.settings);
+    this.aircraft.hoverAssist = !!on;
+    if (this.hud) {
+      this.hud.notify(
+        on
+          ? 'Stability assist on — let go and the helicopter holds its height, levels out and stops'
+          : 'Stability assist off — no help at all. The lever and the stick are all yours.',
+        on ? 'good' : 'info',
+        3.5
+      );
+    }
+    return !!on;
+  }
+
+  /**
+   * Dial the autopilot's heading, speed or climb/descend bug up or down —
+   * from a key, from a touch +/- on its HUD chip, or from the pause menu's
+   * own slider calling the same place. None of these disengage it: that is
+   * the whole point of a bug you can move while it is flying. Only the stick
+   * still hands control back, exactly as before.
+   */
+  nudgeAutopilotHeading(deltaDeg) {
+    const r = this.autopilot.setSelectedHeading(this.autopilot.selectedHeadingDeg + deltaDeg);
+    if (this.autopilot.engaged) this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+    else this.hud.setAutopilotBugs(this.autopilot);
+    return r;
+  }
+
+  nudgeAutopilotSpeed(deltaKt) {
+    const kt = this.autopilot.setSelectedSpeed(this.autopilot.selectedSpeedKts + deltaKt);
+    if (this.autopilot.engaged) this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+    else this.hud.setAutopilotBugs(this.autopilot);
+    return kt;
+  }
+
+  nudgeAutopilotVs(deltaFpm) {
+    const fpm = this.autopilot.setSelectedVs(this.autopilot.selectedVsFpm + deltaFpm);
+    if (this.autopilot.engaged) this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+    else this.hud.setAutopilotBugs(this.autopilot);
+    return fpm;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Settings                                                            */
+  /* ------------------------------------------------------------------ */
+
+  applySetting(path, value) {
+    /*
+     * Graphics quality. `settings.quality` is always a concrete tier — the
+     * nineteen modules that read it compare it with 'low', 'high', 'ultra'.
+     * "Auto" is its own flag: choosing it probes this computer now and writes
+     * the tier it picks, in this same tick. Any concrete tier switches Auto
+     * off. Anything else is ignored rather than saved.
+     */
+    if (path === 'quality') {
+      if (value === 'auto') {
+        this.chooseAutoQuality();
+        return;
+      }
+      if (!isTier(value)) return;
+      this.settings.qualityAuto = false;
+    }
+    const parts = path.split('.');
+    let obj = this.settings;
+    for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
+    obj[parts[parts.length - 1]] = value;
+    saveSettings(this.settings);
+    if (path === 'quality') this.syncFxTier();
+
+    if (path.startsWith('volumes.')) {
+      this.audio.setVolume(parts[1], value);
+    } else if (path === 'muted') {
+      this.audio.setMuted(value);
+      this.hud.setMuted(value);
+      // The start screen's button too, or it still offers "turn it off" and
+      // pressing it turns the sound back ON.
+      this.menus.syncSound(value);
+    } else if (path.startsWith('soundOn.')) {
+      // A source switched on or off. The volume it had is remembered, so
+      // switching it back on returns it to where you left it.
+      const bus = path.slice('soundOn.'.length);
+      this.audio.mixer.setBusEnabled(bus, !!value);
+      if (bus === 'atc' && !value) this.audio.radio.stopSpeech();
+      if (bus === 'music') {
+        this.audio.setMusicEnabled(!!value && this.settings.music !== false);
+        if (!value) this.audio.music.stop();
+        else if (this.state === 'menu') this.audio.music.start();
+      }
+    } else if (path === 'music') {
+      this.audio.setMusicEnabled(value);
+      if (value && this.state === 'menu') this.audio.music.start();
+    } else if (path === 'atcVoice') {
+      this.audio.radio.setMode(value);
+      this.hud.notify(
+        value === 'speech'
+          ? "ATC now uses your device's speech voice"
+          : value === 'recordings'
+            ? 'ATC will play your own clips from assets/atc/ where you have them'
+            : 'ATC back to the synthesised radio',
+        'info',
+        3.2
+      );
+    } else if (path === 'atcChatter') {
+      this.audio.radio.backgroundChatter = value;
+    } else if (path === 'flightMode') {
+      this.aircraft.mode = value;
+      this.hud.notify(
+        value === 'simplified'
+          ? 'Easy mode: the aeroplane helps keep the wings level.'
+          : 'Real mode: full control — it can stall now.',
+        'info',
+        4
+      );
+    } else if (path === 'quality') {
+      this.rebuildQuality(value);
+    } else if (path === 'subtitles') {
+      this.hud.setSubtitlesEnabled(value);
+    } else if (path === 'highContrast') {
+      this.hud.setHighContrast(value);
+      document.body.classList.toggle('is-contrast', !!value);
+    } else if (path === 'largeText') {
+      this.hud.setLargeText(value);
+      document.body.classList.toggle('is-large', !!value);
+    } else if (path === 'hudDensity') {
+      this.hud.setDensity(value);
+    } else if (path === 'runwayLines') {
+      this.minimap.runwayLines = value !== false;
+    } else if (path === 'bigWarnings') {
+      document.documentElement.classList.toggle('no-big-warnings', !value);
+    } else if (path === 'guidance') {
+      this.navGuide.setEnabled(value);
+      this.hud.setGuideActive(value);
+    } else if (path === 'freeLook') {
+      this.input.freeLook = value;
+      this.hud.notify(
+        value
+          ? 'Free look on — move the mouse or use the arrow keys to look around'
+          : 'Free look off — the arrow keys are the throttle again',
+        'info',
+        3.4
+      );
+    } else if (path === 'damageModel') {
+      this.aircraft.survivableStrikes = !!value;
+      if (!value) for (const k in this.aircraft.damage) this.aircraft.damage[k] = 0;
+      this.hud.setDamage(value ? this.aircraft.damage : null);
+      this.hud.notify(
+        value
+          ? 'Damage on — a knock may not end the flight now'
+          : 'Damage off — any contact ends the flight again',
+        'info',
+        3.4
+      );
+    } else if (path === 'minimap') {
+      this.minimap.toggle(!!value);
+      this.syncMinimapClass();
+    } else if (path === 'fleetModels') {
+      // Rebuild the aeroplane so the change is visible now rather than at the
+      // next flight — a model option that does not change the model is broken
+      // in exactly the way the cockpit option used to be.
+      setFleetModels(value);
+      // Only rebuild if there is something to rebuild: the switch lives in the
+      // menus, and from the main screen no aeroplane has been chosen yet.
+      if (this.aircraftType) {
+        const id = this.aircraftType.id;
+        this.aircraftType = null;
+        this.setAircraft(id);
+      }
+      this.hud.notify(
+        value ? 'Using the new aeroplane models' : 'Back to the original aeroplane models',
+        'info',
+        3
+      );
+    } else if (path === 'realisticCockpit') {
+      if (this.rig) this.rig.realisticCockpit = !!value;
+      /*
+       * Switching it on puts you in the cockpit.
+       *
+       * It set a flag on the camera rig and nothing else, so from the chase
+       * view — which is where everyone is — turning on "realistic cockpit"
+       * appeared to do absolutely nothing, and you had to know to press C
+       * afterwards. A view option that does not change the view is broken,
+       * whatever the flag says.
+       */
+      if (value && this.rig && this.rig.mode !== 'cockpit') {
+        this.rig.setMode('cockpit');
+        this.hud.notify('Cockpit view — press C to look from outside again', 'info', 3);
+      }
+      if (this.hud) this.hud.setMinimal(!!value && this.rig && this.rig.mode === 'cockpit');
+    } else if (path === 'livery') {
+      /*
+       * Repainting means rebuilding the model.
+       *
+       * setAircraft early-returns when the id is unchanged, so it cannot do
+       * this job — choosing a new scheme for the aeroplane you are already in
+       * would silently do nothing. Forcing the type to null makes the rebuild
+       * run for real.
+       */
+      // Before the first flight there is no aeroplane built to repaint (the
+      // hangar's paint swatches are pressed from a cold start) — this threw.
+      if (this.aircraftType) {
+        const id = this.aircraftType.id;
+        this.aircraftType = null;
+        this.setAircraft(id);
+      }
+      this.menus.repaintFleetArt && this.menus.repaintFleetArt(value);
+      this.hud.notify(`Repainted — ${findLivery(value).name}`, 'info', 3);
+    } else if (path === 'difficulty') {
+      this.applyDifficulty(value);
+      // The helicopter assist box follows the dial on the same screen.
+      if (this.menus && this.menus.syncSettings) this.menus.syncSettings(this.settings);
+    } else if (path === 'heliAssist') {
+      this.setHeliAssist(value !== false, false);
+    } else if (path === 'realisticFuel') {
+      this.aircraft.realisticFuel = value;
+      this.hud.notify(
+        value
+          ? 'Realistic fuel on — a full tank lasts about 50 minutes. Watch the gauge.'
+          : 'Realistic fuel off',
+        'info',
+        3.5
+      );
+    } else if (path === 'randomWinds') {
+      this.weather.setRandomWinds(value);
+      this.hud.notify(
+        value
+          ? 'Random winds on — expect gusts. Watch the wind arrow.'
+          : 'Random winds off — steady wind again',
+        'info',
+        3.5
+      );
+    } else if (path === 'reducedMotion') {
+      this.rig.reducedMotion = value;
+      // The HUD's own motion (cards sliding, gliding, folding) reads this too.
+      document.documentElement.classList.toggle('reduce-motion', !!value);
+    } else if (path === 'reduceFlashing') {
+      setReduceFlashing(value);
+    } else if (path === 'comicEffects') {
+      setComicEffects(value);
+    } else if (path === 'mouseFlying') {
+      this.input.requestMouseFlying(value);
+    } else if (path === 'invertMouse') {
+      this.input.invertMouse = value;
+    } else if (path === 'sensitivity') {
+      this.input.sensitivity = value;
+    } else if (path === 'gamepad') {
+      this.input.gamepadEnabled = value;
+    }
+  }
+
+  rebuildQuality(quality) {
+    if (quality === this.qualityBuilt) return;
+    this.hud.notify('Rebuilding the island…', 'info', 2.5);
+    // Give the message a frame to paint before the (blocking) rebuild — but
+    // race it against a timer. This is triggered straight from a <select>, and
+    // while a native dropdown is open the browser stops servicing
+    // requestAnimationFrame, so the callback never ran and the world was never
+    // rebuilt. From the outside that looks exactly like the game freezing the
+    // moment you choose something. `frame()` already does this for loading.
+    this.afterPaint(() => this.applyQualityNow(quality));
+  }
+
+  /** Rebuild the world at `quality`, now. rebuildQuality() runs this after a paint. */
+  applyQualityNow(quality) {
+    this.buildWorld(quality);
+    this.renderer.shadowMap.enabled = quality !== 'low';
+    // A new world is a new cost: the dynamic resolution starts again from full.
+    if (this.dynRes) this.dynRes.reset();
+    this.renderer.setPixelRatio(pixelRatioCap(quality, window.devicePixelRatio));
+    /*
+     * And the textures with it.
+     *
+     * Switching to Ultra from inside the game used to drop the pixel ratio
+     * to 1.25 — 'ultra' is not 'high', so the old test took the low branch
+     * and the best setting in the game rendered at less than half the
+     * resolution of the one below it.
+     */
+    try {
+      setTextureAnisotropy(quality === 'ultra' ? this.renderer.capabilities.getMaxAnisotropy() : 4);
+    } catch (e) {
+      /* a card that will not answer keeps the safe default */
+    }
+    this.sky.update(this.weather);
+  }
+
+  /**
+   * Time what a frame costs on this computer, as it is drawn right now, and
+   * say which tier that means. A one-pixel read after each frame waits for
+   * the GPU, so the probe sees the whole frame and not just the CPU's half.
+   * The time is converted to "what High would cost" when another tier is
+   * built (quality-probe.js TIER_COST), because the thresholds are High's.
+   */
+  probeQuality() {
+    const gl = this.renderer.getContext();
+    const px = new Uint8Array(4);
+    const res = probeFrames(() => this.renderFrame(), {
+      sync: () => gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px),
+    });
+    const built = this.qualityBuilt || this.settings.quality;
+    const highMs = asHighMs(res.avgMs, built);
+    const dpr = window.devicePixelRatio || 1;
+    const picked = pickTier(highMs, dpr);
+    this.qualityProbe = {
+      picked,
+      built,
+      avgMs: Math.round(res.avgMs * 100) / 100,
+      highMs: Math.round(highMs * 100) / 100,
+      frames: res.frames,
+      ms: Math.round(res.totalMs),
+      dpr,
+    };
+    console.info(
+      `[quality] Auto: ${res.frames} frames at ${built}, ${this.qualityProbe.avgMs} ms (about ${this.qualityProbe.highMs} ms at high) -> ${picked}`
+    );
+    return this.qualityProbe;
+  }
+
+  /**
+   * First boot with Auto on: the world is built at High (the default), the
+   * aeroplane is on the runway behind the loading screen, so time real
+   * frames of that. A lower pick rebuilds now; a higher one (Ultra) is saved
+   * and builds at the next start, like the antialias change.
+   */
+  autoQualityAtBoot() {
+    const ac = this.aircraft;
+    ac.reset({ ...RUNWAY_START, engineOn: true });
+    syncAircraftModel(this.model, ac);
+    this.sky.update(this.weather);
+    this.sky.followTarget(ac.pos);
+    this.ocean.follow(ac.pos);
+    this.ocean.update(0, this.weather);
+    this.clouds.update(0, this.weather, ac.pos);
+    // The chase view's spot, near enough: behind and above, looking along.
+    const h = THREE.MathUtils.degToRad(ac.readouts().heading || 90);
+    this.camera.position.set(ac.pos.x - Math.sin(h) * 22, ac.pos.y + 6, ac.pos.z + Math.cos(h) * 22);
+    this.camera.lookAt(ac.pos.x + Math.sin(h) * 60, ac.pos.y + 2, ac.pos.z - Math.cos(h) * 60);
+    const res = this.probeQuality();
+    const s = this.settings;
+    s.qualityAutoPicked = res.picked;
+    s.quality = res.picked;
+    // The models' tier (the heat haze is High and up) and html.fx-low follow the pick now, not at the next start.
+    this.syncFxTier();
+    if (tierRank(res.picked) < tierRank(this.qualityBuilt)) this.applyQualityNow(res.picked);
+    saveSettings(s);
+    if (this.menus && this.menus.syncSettings) this.menus.syncSettings(s);
+    return res;
+  }
+
+  /** The menu's "Auto": probe now, write the tier, rebuild. */
+  /**
+   * html.fx-low while the quality tier is Low: styles/main.css turns every
+   * backdrop blur under the interface off and gives the glass a solid
+   * translucent back instead. A classroom Chromebook pays for a blur on
+   * every frame the menu or the HUD is up; the colours and the layout cost
+   * nothing. Follows the tier wherever it is written: start-up, Settings,
+   * and the Auto probe's pick.
+   */
+  syncFxTier() {
+    // The models read the tier too (the heat haze behind a jet hides below High).
+    setModelQuality(this.settings.quality);
+    if (typeof document === 'undefined' || !document.documentElement) return;
+    document.documentElement.classList.toggle('fx-low', this.settings.quality === 'low');
+  }
+
+  chooseAutoQuality() {
+    const s = this.settings;
+    s.qualityAuto = true;
+    let picked = s.qualityAutoPicked || s.quality;
+    try {
+      picked = this.probeQuality().picked;
+    } catch (err) {
+      console.warn('[quality] the Auto probe failed; keeping', picked, err);
+    }
+    s.qualityAutoPicked = picked;
+    s.quality = picked;
+    saveSettings(s);
+    this.syncFxTier();
+    if (this.menus && this.menus.syncSettings) this.menus.syncSettings(s);
+    const label = { low: 'Low', medium: 'Medium', high: 'High', ultra: 'Ultra' }[picked];
+    if (picked === this.qualityBuilt) {
+      if (this.hud) this.hud.notify(`Auto: ${label} suits this computer`, 'info', 3);
+    } else {
+      this.rebuildQuality(picked);
+      if (this.hud) this.hud.notify(`Auto picked ${label} for this computer`, 'info', 3);
+    }
+  }
+
+  /**
+   * Fly somewhere else. The runway is identical on every map, so the tutorial,
+   * every mission and the landing scoring all carry over untouched — only the
+   * land around the field changes.
+   */
+  /**
+   * Choose which aeroplane to fly.
+   *
+   * A different aeroplane is a different flight model *and* a different model
+   * on screen, so both are replaced. The old one is disposed rather than just
+   * detached — leaked geometry is what used to make the sea flicker after a
+   * long session, and there is no reason to relearn that lesson here.
+   */
+  setAircraft(id) {
+    const want = getAircraft(id);
+    if (this.aircraftType && this.aircraftType.id === want.id) return this.aircraftType;
+    this.aircraftType = applyAircraft(want.id);
+    const S = this.aircraftType.shape;
+
+    if (this.model) {
+      this.scene.remove(this.model);
+      const seen = new Set();
+      this.model.traverse((o) => {
+        if (o.geometry && !seen.has(o.geometry)) {
+          seen.add(o.geometry);
+          o.geometry.dispose();
+        }
+        const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+        for (const m of mats) {
+          if (seen.has(m)) continue;
+          seen.add(m);
+          m.dispose();
+        }
+      });
+    }
+
+    this.model = createAircraftModel({
+      type: this.aircraftType,
+      livery: schemeFor(this.aircraftType, this.settings.livery),
+    });
+    this.scene.add(this.model);
+    this.cockpit = createCockpit({ highContrast: this.settings.highContrast, type: this.aircraftType, model: this.model });
+    // The airframe is scaled to size; the cockpit is not. There is one
+    // instrument panel and the pilot is the same size in every aeroplane,
+    // so it is counter-scaled back to life size.
+    /*
+     * ...by what the model it hangs on is actually scaled by. model.js (and
+     * the Blender helicopter) scale their root by shape.scale; the fleet pack
+     * builds its aeroplanes in metres at scale 1. Dividing by shape.scale
+     * regardless shrank the panel in every fleet-drawn aeroplane — measured in
+     * the realistic cockpit view: Vanguard 0.82 of life size, Osprey 0.78,
+     * Nightjar 0.51 with its face 1.5 m BEHIND the pilot's eye, and the three
+     * airliners 0.40 / 0.25 / 0.20 until features/airliners.js reseated them.
+     */
+    const k = this.model.userData.fleetBridge ? 1 : S.scale;
+    this.cockpit.scale.setScalar(1 / k);
+    /*
+     * ...and then moved so its own eye point lands where *this* aeroplane's
+     * pilot actually sits. Without this the panel stays bolted to the centre
+     * of gravity: fine in the trainer, where the two coincide, and three
+     * metres behind your head in the airliner.
+     *
+     * `eye` here is in FINAL metres. types.js stores it pre-scale, so the old
+     * figure is scaled up; a fleet model measures its own and needs no
+     * scaling. That distinction matters: the fleet aeroplanes are longer, and
+     * reusing the old eye put the pilot eight metres back in the Meridian's
+     * cabin, staring at the inside of the flight-deck wall.
+     */
+    const eye = eyeFor(this.model, [S.eye[0] * S.scale, S.eye[1] * S.scale, S.eye[2] * S.scale]);
+    const TRAINER_EYE = [-0.24, 0.46, 0.06];
+    this.cockpit.position.set(
+      eye[0] / k - TRAINER_EYE[0] / k,
+      eye[1] / k - TRAINER_EYE[1] / k,
+      eye[2] / k - TRAINER_EYE[2] / k
+    );
+    this.model.add(this.cockpit);
+    this.cockpit.visible = false;
+
+    // How far the picture has to drop so the wheels meet the tarmac.
+    // specFor rebuilds the flight spec from the same shape the physics uses,
+    // so the gear points compared here are exactly the ones it lands on.
+    this.model.userData.groundOffsetY = groundOffsetFor(this.model, specFor(this.aircraftType.id));
+
+    if (this.rig) {
+      /*
+       * A fleet model is drawn groundOffsetY above or below the aeroplane
+       * (syncAircraftModel), and so is the seat its eye point was measured
+       * from — and the panel, which hangs on the model. The camera was not
+       * moved with them. Raycast from where it sat: 0.79 m above the
+       * Nightjar's seat, clear of the airframe with nothing above it or ahead
+       * of it and the panel 0.79 m lower than it should be; 0.02 m under the
+       * Vanguard's canopy, inside the 0.08 m near plane. Everything else the
+       * pack draws is within 0.15 m of it (the airliners 0.02, the jets 0).
+       * Exact wings level. syncAircraftModel adds the offset straight up in
+       * the world, not along the aeroplane's own up, so banked the drawn seat
+       * and this eye part by 2 x offset x sin(bank / 2) — 0.41 m in the
+       * Nightjar at 30 degrees, against the 0.79 m it was always off by.
+       */
+      const drawnY = this.model.userData.fleetBridge ? this.model.userData.groundOffsetY || 0 : 0;
+      this.rig.eye.set(eye[0], eye[1] + drawnY, eye[2]);
+      this.rig.realisticCockpit = !!this.settings.realisticCockpit;
+      // How far down this cockpit's view looks (its screens may sit low).
+      this.rig.cockpitPitchDeg = this.cockpit.userData.viewPitchDeg || 0;
+      /*
+       * The follow view's standoff, fitted to the aeroplane just drawn (see
+       * chaseScaleFor): 1 for the Skylark and the jets, 1.64 for the Meridian,
+       * whose fin the camera used to sit in.
+       *
+       * The three airliners are fitted THROUGH the stretch features/airliners.js
+       * puts on their follow view afterwards (length / 24, and the height a
+       * further 1.4 — the number in its stretchView()), so this is only the
+       * rig's share of it. Fitting them bare, as if nothing stretched them,
+       * multiplied the two: the 747 186 m behind and 80 m above itself on the
+       * runway. Leaving them at 1 left the stretch alone to do it, and it is
+       * not enough on the runway: measured at rest at 16:10, the tailplane and
+       * aft fuselage of the A320 and 747 ran off the bottom of the picture
+       * (y -1.17) and the A380's wing tips touched both sides (x +/-1.00).
+       * Fitted through it the rig's share is 1.20, 1.21 and 1.40, and at rest
+       * at 16:10 the three fill +/-0.75, 0.72 and 0.65 of the picture (0.78
+       * each at 4:3), the lens 12, 22 and 35 m behind the tail. In 250 kt
+       * cruise it is 80, 144 and 159 m from them, where it was 89, 162 and 170.
+       * chaseAlone is the bare fit, for if the stretch never happens.
+       */
+      const stretch = airlinerViewScale(this.aircraftType.id);
+      const fit = stretch > 1 ? chaseScaleFor(this.model, stretch, 1.4) : chaseScaleFor(this.model);
+      this.rig.chaseBack = CHASE_BACK * fit;
+      this.rig.chaseUp = CHASE_UP * fit;
+      const alone = stretch > 1 ? chaseScaleFor(this.model) : 0;
+      this.rig.chaseAlone = alone ? { back: CHASE_BACK * alone, up: CHASE_UP * alone } : null;
+    }
+    if (this.hud) this.hud.setAircraftName(this.aircraftType.name);
+    // A rotor is not a piston engine. Without this the helicopter keeps the
+    // four-cylinder synth and the blade slap is never reached.
+    if (this.audio) this.audio.setEngineKind(S.power.rotor ? 'rotor' : S.power.kind);
+
+    /*
+     * Re-seat the aeroplane if it is sitting on the ground.
+     *
+     * Swapping to a taller aeroplane left it at the previous one's spawn
+     * height with the new one's undercarriage, which drove the nose straight
+     * into the tarmac — an instant "The nose struck the ground" before you had
+     * touched anything. Nothing a player can reach today does this, because
+     * the fleet is chosen before the flight starts, but it is a loaded gun
+     * lying around for the next mission that changes aeroplane mid-flight.
+     */
+    if (this.aircraft && this.aircraft.onGround && !this.aircraft.crashed) {
+      /*
+       * reset() clears every failure and fills the tank, which is right when a
+       * flight begins and quite wrong here: repainting the aeroplane on the
+       * stand silently refuelled you and cancelled the engine failure you had
+       * armed. So both are carried across.
+       */
+      const keptFailures = { ...this.aircraft.failures };
+      const keptFuel = this.aircraft.fuelFraction();
+      this.aircraft.reset({
+        pos: this.aircraft.pos.clone(),
+        headingDeg: this.aircraft.readouts().heading,
+        speed: this.aircraft.groundSpeed,
+        engineOn: this.aircraft.engineOn,
+        fuel: keptFuel,
+      });
+      Object.assign(this.aircraft.failures, keptFailures);
+    }
+    return this.aircraftType;
+  }
+
+  /**
+   * Fire any failure that was armed before the flight and whose time has come.
+   * The clock only runs once you are airborne — "after five minutes" should
+   * not tick away while you are still on the stand.
+   */
+  /**
+   * Set how much the aeroplane helps.
+   *
+   * Easy and normal both fly the simplified model — the difference is how much
+   * it does for you. Realistic is the assists off entirely, which is what the
+   * old 'realistic' flight mode always was, so the two settings are folded
+   * into one dial rather than being two overlapping switches.
+   */
+  applyDifficulty(level) {
+    const lv = ['easy', 'normal', 'realistic'].includes(level) ? level : 'normal';
+    this.settings.difficulty = lv;
+    this.settings.flightMode = lv === 'realistic' ? 'realistic' : 'simplified';
+    this.aircraft.mode = this.settings.flightMode;
+    this.aircraft.difficulty = lv;
+    // The helicopter's stability assist follows the dial: on for easy and
+    // normal, off for realistic ("no assistance at all"). F in the
+    // helicopter, or the box in Settings, still switches it either way.
+    this.settings.heliAssist = lv !== 'realistic';
+    this.aircraft.hoverAssist = this.settings.heliAssist;
+    saveSettings(this.settings);
+    if (this.hud) {
+      this.hud.notify(
+        lv === 'easy'
+          ? 'Easy — the aeroplane helps you rotate, flare and stay out of a stall'
+          : lv === 'realistic'
+            ? 'Realistic — no assistance at all. It can stall and it will drift.'
+            : 'Normal — gentle help, the way the game has always flown',
+        'info',
+        4
+      );
+    }
+    return lv;
+  }
+
+  updateArmedFailures(dt) {
+    const ac = this.aircraft;
+    // Two clocks. The flight clock only runs once you are actually airborne,
+    // because "after five minutes of flight" should not tick away while you
+    // are still taxiing. But anything armed for *straight away* used to wait
+    // on that same clock, so it sat there doing nothing until you took off —
+    // which reads as broken rather than as waiting. Zero now means zero.
+    this._groundT = (this._groundT || 0) + dt;
+    if (!this._hasFlown && ac.agl > 8) this._hasFlown = true;
+    if (this._hasFlown) this._armedT += dt;
+    const due = (a) => (a.afterMin > 0 ? this._hasFlown && this._armedT >= a.afterMin * 60 : this._groundT >= 2.5);
+
+    for (const id of Object.keys(this.armedEvents || {})) {
+      const a = this.armedEvents[id];
+      if (!due(a)) continue;
+      delete this.armedEvents[id];
+      this.triggerNatural(id);
+    }
+    const armed = this.armed;
+    if (!armed) return;
+    for (const kind of Object.keys(armed)) {
+      const a = armed[kind];
+      if (!due(a)) continue;
+      delete armed[kind];
+      if (kind === 'fuelLeak' && a.amountMin) ac.fuelLeakSeconds = a.amountMin * 60;
+      if (!ac.failures[kind]) this.toggleFailure(kind);
+    }
+  }
+
+  /**
+   * Roll the dice. Only when you have asked for it, only while airborne, and
+   * never twice for the same thing.
+   */
+  /**
+   * The mountain's own business, which runs whether or not you asked for
+   * random disasters — an active volcano does not wait to be switched on.
+   *
+   * Two rules: it erupts every few minutes on a map that has one, and flying
+   * near the crater always puts you in ash. The second is not a dice roll. If
+   * you fly through the column over a live vent, your engine eats it; the game
+   * should not sometimes let you get away with that.
+   */
+  updateVolcano(dt) {
+    if (!MAP.features || !MAP.features.volcano || !this._hasFlown) return;
+    const ac = this.aircraft;
+    if (ac.crashed || this.state !== 'flying') return;
+
+    // The cone itself — the first volcano in the list is the big one.
+    const isl = (MAP.islands || []).find((i) => i.name === MAP.features.volcano[0].island) || MAP.islands[0];
+    if (!isl) return;
+    const dist = Math.hypot(ac.pos.x - isl.cx, ac.pos.z - isl.cz);
+
+    // Near the core: always ash, every time, for as long as you stay there.
+    const inPlume = dist < isl.radius * 0.55 && ac.pos.y < isl.peak + 1400;
+    if (inPlume) {
+      this._ashDwell = (this._ashDwell || 0) + dt;
+      if (this._ashDwell > 2.5 && !this.activeEvents?.ashCloud) {
+        this.triggerNatural('ashCloud');
+        this.hud.notify('You are in the ash column — the engine is eating it', 'warn', 5);
+      }
+    } else {
+      this._ashDwell = 0;
+    }
+
+    // And every so often, it goes up.
+    this._eruptT = (this._eruptT || 0) + dt;
+    if (this._eruptT > (this._nextErupt || 300)) {
+      this._eruptT = 0;
+      this._nextErupt = 260 + Math.random() * 320;
+      this.triggerNatural('eruption');
+    }
+
+    // While it is erupting the air over the cone is a chimney: a huge
+    // updraught in the middle, and the ash reaches much further out.
+    if (this.erupting > 0) {
+      this.erupting -= dt;
+      const reach = isl.radius * 1.25;
+      if (dist < reach && ac.pos.y < isl.peak + 2600) {
+        const f = 1 - dist / reach;
+        ac.vel.y += 12 * f * dt;
+        this.rig.kick(f * 0.5 * dt * 6);
+        if (dist < isl.radius * 0.75) this._ashDwell = (this._ashDwell || 0) + dt * 2;
+      }
+    }
+  }
+
+  updateRandomDisasters(dt) {
+    if (!this.randomDisasters || !this._hasFlown) return;
+    const ac = this.aircraft;
+    // A storm roughly halves the time between events; clear air stretches it.
+    // Worse weather and a harder map both make things happen more often —
+    // which is what choosing Ember Isle over Harrier Flats ought to mean.
+    const severity =
+      (1 + (this.weather.cond.turb || 0) * 0.9 + (this.weather.cond.cloud || 0) * 0.35) *
+      severityForMap(MAP);
+    this._disasterT += dt * severity;
+    if (this._disasterT < this._nextDisaster) return;
+    this._disasterT = 0;
+    this._nextDisaster = 240 + Math.random() * 300;
+
+    // Roughly half mechanical, half meteorological.
+    const spare = Object.keys(ac.failures).filter((k) => !ac.failures[k]);
+    const events = poolForMap(MAP);
+    const useWeather = events.length && (!spare.length || Math.random() < 0.5);
+    if (useWeather) {
+      this.triggerNatural(events[Math.floor(Math.random() * events.length)].id);
+      return;
+    }
+    if (!spare.length) return;
+    const pick = spare[Math.floor(Math.random() * spare.length)];
+    if (pick === 'fuelLeak') ac.fuelLeakSeconds = 180 + Math.random() * 240;
+    this.toggleFailure(pick);
+  }
+
+  /**
+   * Set a natural disaster going. Unlike the mechanical failures these are not
+   * toggles — weather happens to you and then it is over.
+   */
+  triggerNatural(id) {
+    const ev = findEvent(id);
+    if (!ev) return;
+    // False = it could not happen here (a wildfire with nothing to burn): no
+    // warning for something that is not there.
+    if (ev.apply(this) === false) return;
+    // Remember it is running so the pause menu can show which ones are live.
+    this.activeEvents = this.activeEvents || {};
+    this.activeEvents[id] = ev.duration || 8;
+    this.menus.syncNatural(this.activeEvents);
+    // A bird strike whose flock is still on its way warns when it hits (features/bird-strike.js), not now.
+    if (id === 'birdStrike' && this.birdStrike && this.birdStrike.pending) return;
+    this.hud.notify(ev.warn, ev.kind === 'bad' ? 'warn' : 'warn', 5);
+    if (this.audio.available) this.audio.alerts.caution && this.audio.alerts.caution();
+  }
+
+  /**
+   * Break something on purpose, or put it back. Free Flight only — an engine
+   * failure in the middle of a lesson is not a lesson.
+   */
+  toggleFailure(kind) {
+    const f = this.aircraft.failures;
+    if (!(kind in f)) return;
+    f[kind] = !f[kind];
+    const on = f[kind];
+    const words = {
+      engine: ['Engine failure — trim for best glide and pick a field', 'Engine restored'],
+      fuelLeak: ['Fuel leak — watch the gauge, you have minutes', 'Leak stopped'],
+      elevator: ['Elevator jammed — fly it on power and trim', 'Elevator freed'],
+      icing: ['Picking up ice — it will stall earlier than usual', 'Ice gone'],
+      gear: ['Undercarriage jammed', 'Undercarriage freed'],
+      brakes: ['Brakes have failed — plan a long roll-out', 'Brakes restored'],
+      roughEngine: ['Engine running rough — part power only, pick somewhere close', 'Engine smooth again'],
+      tyre: ['Burst tyre — it will pull hard to the left on the ground', 'Tyre changed'],
+    };
+    if (on && kind === 'engine') this.aircraft.stopEngine('failure');
+    this.hud.notify(words[kind][on ? 0 : 1], on ? 'warn' : 'good', 4);
+    this.menus.syncTriggers(this.mode === 'free', f);
+  }
+
+  setMap(id) {
+    const def = applyMap(id);
+    this.layRoads();
+    // The field moved. Tell the modules that cached its height.
+    refreshRunways();
+    refreshApronElevation();
+    this.settings.map = def.id;
+    saveSettings(this.settings);
+    this.menus.syncMap(def.id);
+    if (this.state === 'flying') this.quitToMenu();
+    this.hud.notify(`Flying to ${def.name}…`, 'info', 3);
+    // One frame so the message paints before the (blocking) rebuild, raced
+    // against a timer for the same reason as above.
+    this.afterPaint(() => {
+      this.buildWorld(this.settings.quality);
+      // Each map has weather that suits it; the player can still change it in
+      // Free Flight afterwards.
+      this.weather.load({
+        time: def.weather.time,
+        condition: def.weather.cond,
+        windSpeedKts: def.weather.windSpeedKts,
+        windDirDeg: def.weather.windDirDeg,
+      });
+      this.settings.weather = this.weather.serialize();
+      saveSettings(this.settings);
+      this.menus.syncSettings(this.settings);
+      this.sky.update(this.weather);
+      this.aircraft.reset({ ...RUNWAY_START, engineOn: true });
+      this.hud.clearTransient();
+      this.hud.notify(`${def.name} — ${def.subtitle}`, 'good', 5);
+    });
+    return def;
+  }
+
+  async unlockAudio() {
+    if (this.audio.started || this._unlocking) return;
+    this._unlocking = true;
+    // Before the context exists, so its master is made silent. Applied only
+    // afterwards, the master was made at full volume and took a fifth of a
+    // second to fade: sound off, and every session began with a blip of engine.
+    this.audio.setMuted(this.settings.muted);
+    const ok = await this.audio.start();
+    this._unlocking = false;
+    if (!ok) {
+      this.hud && this.hud.notify('Sound is unavailable in this browser — everything else still works.', 'warn', 6);
+      return;
+    }
+    for (const bus in this.settings.volumes) this.audio.setVolume(bus, this.settings.volumes[bus]);
+    this.audio.setMuted(this.settings.muted);
+    this.audio.setMusicEnabled(this.settings.music);
+    // Restore each source's on/off switch.
+    const on = this.settings.soundOn || {};
+    for (const bus of ['engine', 'environment', 'atc', 'alerts', 'music']) {
+      this.audio.mixer.setBusEnabled(bus, on[bus] !== false);
+    }
+    this.audio.radio.backgroundChatter = this.settings.atcChatter;
+    this.audio.radio.setMode(this.settings.atcVoice || 'radio');
+    if (this.settings.music && this.state === 'menu') this.audio.music.start();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* PWA                                                                 */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Catch a whole class of bug that has now bitten this project twice: a
+   * full-screen panel carrying the `hidden` attribute, whose class also sets
+   * `display`, which beats `[hidden]` and leaves an invisible — or worse, a
+   * near-opaque black — sheet over the entire game swallowing every click.
+   *
+   * Cheap, runs once, and says exactly which element is at fault.
+   */
+  checkForStuckOverlays() {
+    try {
+      for (const el of document.querySelectorAll('[hidden]')) {
+        if (getComputedStyle(el).display !== 'none') {
+          console.error(
+            `[island-flight] "${el.id || el.className}" has the hidden attribute but is still ` +
+              `displayed (display: ${getComputedStyle(el).display}). Add a ` +
+              `"${el.id ? '#' + el.id : '.' + el.className.split(' ')[0]}[hidden] { display: none; }" rule.`
+          );
+        }
+      }
+      // And confirm nothing is sitting on top of the middle of the screen.
+      const top = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+      if (top && top.id === 'fatal') {
+        console.error('[island-flight] the error panel is covering the game — see above.');
+      }
+    } catch {
+      /* diagnostics must never break the game */
+    }
+  }
+
+  setupPwa() {
+    // ?dev=1 skips (and clears) the service worker. Cache-first offline support
+    // is exactly what you want for players and exactly what you do not want
+    // while editing the game, because reloads keep serving the old files.
+    const params = new URLSearchParams(location.search);
+    const devMode = params.has('dev');
+    // Inside the native macOS app the game is served over a private URL
+    // scheme, where service workers neither work nor are needed — the whole
+    // thing is already on disk. Registering would only throw.
+    if (!/^https?:$/.test(location.protocol)) return;
+    if ('serviceWorker' in navigator && devMode) {
+      navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister()));
+      if (window.caches) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k)));
+      console.info('[dev] service worker disabled for this session');
+    } else if ('serviceWorker' in navigator) {
+      // A new version has to be able to replace an old one even if the old one
+      // is misbehaving. Check on every load, and reload once as soon as a new
+      // worker takes over — otherwise the page you are looking at keeps the
+      // files it was given, and an update can appear to do nothing at all.
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (this._reloadingForUpdate) return;
+        this._reloadingForUpdate = true;
+        console.info('[sw] new version installed — reloading');
+        location.reload();
+      });
+      // Boot is async and takes a second or two, so the window 'load' event has
+      // usually already fired by the time we get here — registering on that
+      // event alone means it never happens and offline play silently breaks.
+      const register = () =>
+        navigator.serviceWorker
+          .register('sw.js')
+          .then((reg) => reg.update())
+          .catch((err) => {
+            console.warn('Offline support unavailable:', err);
+          });
+      if (document.readyState === 'complete') register();
+      else window.addEventListener('load', register, { once: true });
+    }
+
+    // Escape hatch. If a cached copy ever goes wrong, ?reset=1 throws away
+    // every service worker and cache and reloads clean.
+    if (params.has('reset')) {
+      const wipe = async () => {
+        if ('serviceWorker' in navigator) {
+          const rs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(rs.map((r) => r.unregister()));
+        }
+        if (window.caches) {
+          const ks = await caches.keys();
+          await Promise.all(ks.map((k) => caches.delete(k)));
+        }
+        location.replace(location.pathname);
+      };
+      wipe();
+      return;
+    }
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      this.installPrompt = e;
+      this.menus.showInstall(true);
+    });
+    window.addEventListener('appinstalled', () => {
+      this.installPrompt = null;
+      this.menus.setInstalled();
+    });
+    if (window.matchMedia('(display-mode: standalone)').matches) this.menus.setInstalled();
+  }
+
+  async promptInstall() {
+    if (!this.installPrompt) {
+      alert(
+        'Your browser has not offered an install prompt yet.\n\n' +
+          'In Chrome or Edge, use the ⊕ / install icon in the address bar.\n' +
+          'On iPhone or iPad, tap Share then "Add to Home Screen".\n\n' +
+          'The game caches itself as soon as it loads, so it already works offline.'
+      );
+      return;
+    }
+    this.installPrompt.prompt();
+    const choice = await this.installPrompt.userChoice;
+    if (choice.outcome === 'accepted') this.menus.setInstalled();
+    this.installPrompt = null;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Radio + notifications used by missions                              */
+  /* ------------------------------------------------------------------ */
+
+  speak(text, voice = 'tower', urgency = 0) {
+    if (this.audio.available) this.audio.radio.transmit(text, { voice, urgency });
+    else this.hud.setSubtitle(text, voice, 4);
+  }
+
+  notify(text, kind = 'info') {
+    this.hud.notify(text, kind);
+  }
+
+  /**
+   * What is aboard, and how much of it.
+   *
+   * `hasCargo` used to be one boolean: you were given one store, you dropped
+   * it, and that was the sortie. One run at the range means one chance to
+   * judge a release, which is not how anybody learns to judge a release — and
+   * a supply run that ends after a single crate is a strange kind of supply
+   * run.
+   *
+   * So the aeroplane carries what its type says it carries, and the next one
+   * comes off the rack once the last has arrived. `hasCargo` still means
+   * exactly what it meant — is there one ready right now — so every mission
+   * that sets it keeps working, and setting it loads the aeroplane up.
+   */
+  get hasCargo() {
+    return this._armed;
+  }
+
+  set hasCargo(v) {
+    this._armed = !!v;
+    // Loading arms a full rack; unloading empties it. Dropping one is neither,
+    // and goes through dropCargo() rather than through here.
+    if (v) {
+      if (this._storesLeft <= 0) this._storesLeft = this.storeCapacity();
+    } else {
+      this._storesLeft = 0;
+    }
+  }
+
+  /** How many an aeroplane of this type carries. */
+  storeCapacity() {
+    return (this.aircraftType && this.aircraftType.stores) || 1;
+  }
+
+  /** How many are left, the one already gone not counted. */
+  get storesLeft() {
+    return Math.max(0, this._storesLeft);
+  }
+
+  /**
+   * X: let go of whatever is aboard.
+   *
+   * On a transport that is a crate under a parachute. On a military aeroplane
+   * it is a bomb, which is a different problem entirely: it keeps all of the
+   * aeroplane's forward speed, so you have to release well before the target
+   * and judge how far ahead. The range mission was dropping a supply crate,
+   * which is why it never felt like a bombing run.
+   */
+  dropCargo() {
+    if (!this.hasCargo || this.crate) return false;
+    const military = !!(this.aircraftType && this.aircraftType.military);
+    // Out of the bay on a bomber, off the belly on everything else.
+    const offset = new THREE.Vector3(0, military ? -1.1 : -1.6, military ? 0.4 : 0)
+      .applyQuaternion(this.aircraft.quat)
+      .add(this.aircraft.pos);
+    this.crate = military
+      ? new PracticeBomb(this.scene, offset, this.aircraft.vel)
+      : new CargoCrate(this.scene, offset, this.aircraft.vel);
+    this._armed = false;
+    this._storesLeft = Math.max(0, this._storesLeft - 1);
+    const left = this._storesLeft;
+    this.hud.notify(
+      (military ? 'Store away — watch it run on ahead of you' : 'Crate released — parachute out!')
+        + (left > 0 ? ` · ${left} left` : ' · last one'),
+      'good',
+      3
+    );
+    this.audio.available && this.audio.ambience.playFlaps();
+    return true;
+  }
+
+  removeCrate() {
+    this.crateClear = 0;
+    if (this.crate) {
+      this.crate.dispose();
+      this.crate = null;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Frame loop                                                          */
+  /* ------------------------------------------------------------------ */
+
+  onResize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+
+  /**
+   * Sim gear's levers and switches (flight/controllers.js through input.hw):
+   * the reverse range below the thrust levers' idle, the speedbrake and flap
+   * levers, the engine master switches, the parking brake and the autopilot
+   * disconnect buttons. The levers act when they MOVE, so the keys and the
+   * touch buttons for the same things keep working beside them.
+   */
+  applyControllers() {
+    const hw = this.input.hw;
+    const ac = this.aircraft;
+    const H = this._hwSys || (this._hwSys = { rev: false, sb: null, flap: null, revWarn: 0 });
+    if (!hw || !ac || ac.crashed) {
+      H.sb = H.flap = null;
+      return;
+    }
+    const wings = !SPEC.rotor;
+    // Reverse: a thrust lever pulled back through idle.
+    if (wings && hw.reverse !== null) {
+      const want = reverseDetent(hw.reverse, H.rev ? ac.reverse : 0);
+      if (want > 0) {
+        if (!SPEC.reversers) {
+          if (!H.revWarn) this.hud.notify('This aeroplane has no thrust reversers', 'info', 2);
+          H.revWarn = 1;
+        } else if (!ac.onGround) {
+          if (!H.revWarn) this.hud.notify('Reversers are locked out in the air — land first', 'warn', 2.4);
+          H.revWarn = 1;
+        } else if (ac.reverse !== want && (ac.reverse > 0 || (ac.groundSpeed || 0) >= 1)) {
+          ac.reverse = want;
+          H.rev = true;
+          this.hud.notify(want >= 1 ? 'MAX reverse' : 'Idle reverse', 'info', 1.6);
+        }
+      } else {
+        H.revWarn = 0;
+        if (H.rev && ac.reverse > 0) {
+          ac.reverse = 0;
+          this.hud.notify('Reversers stowed', 'info', 1.4);
+        }
+        H.rev = false;
+      }
+    }
+    // The speedbrake lever: its position is the lever's, once it moves.
+    if (wings && hw.speedbrake !== null) {
+      if (H.sb === null) H.sb = hw.speedbrake;
+      else if (Math.abs(hw.speedbrake - H.sb) > 0.04) {
+        H.sb = hw.speedbrake;
+        if (SPEC.spoilers) {
+          const was = ac.speedbrake || 0;
+          ac.speedbrake = hw.speedbrake < 0.06 ? 0 : Math.min(1, hw.speedbrake);
+          if ((was > 0) !== (ac.speedbrake > 0)) this.hud.notify(ac.speedbrake > 0 ? 'Speedbrake out' : 'Speedbrake in', 'info', 1.4);
+        }
+      }
+    } else H.sb = null;
+    // The flap lever: four positions, each with a margin so a lever resting between two does not flap them up and down.
+    if (wings && hw.flaps !== null) {
+      const f = hw.flaps * 3;
+      const step = H.flap !== null && Math.abs(f - H.flap) < 0.62 ? H.flap : Math.round(f);
+      if (H.flap === null) H.flap = step;
+      else if (step !== H.flap) {
+        H.flap = step;
+        if (step !== ac.flapStep()) {
+          const s = ac.setFlaps(step);
+          this.audio.available && this.audio.ambience.playFlaps();
+          this.hud.notify(s ? `Flaps ${s * 10}°` : 'Flaps up', 'info', 1.8);
+        }
+      }
+    } else H.flap = null;
+    // Engine masters: a switch to ON starts the engine; both OFF stops it.
+    const m = hw.masters;
+    if (m && m.known && m.changed) {
+      if (m.anyOn && !ac.engineOn && !(ac.starting > 0)) this.pressStarter(true);
+      else if (!m.anyOn && ac.engineOn) this.pressStarter(true);
+    }
+    if (hw.edges.parkingBrake) {
+      if (ac.parkingBrake) {
+        ac.parkingBrake = false;
+        this.hud.notify('Parking brake released', 'info', 1.8);
+      } else if (ac.onGround && (ac.groundSpeed || 0) < 1.5) {
+        ac.parkingBrake = true;
+        this.hud.notify('Parking brake set', 'info', 1.8);
+      } else this.hud.notify('Stop first — the parking brake is for standing still', 'info', 2);
+    }
+    if (hw.edges.apDisconnect) {
+      if (this.autopilot.engaged) this.toggleAutopilot(false);
+      else this.hud.notify(`Autopilot is off — ${codesFor('autopilot').length ? keyLabel(codesFor('autopilot')[0]) : 'its key'} engages it`, 'info', 2);
+    }
+  }
+
+  handleDiscreteInput() {
+    const input = this.input;
+    const ac = this.aircraft;
+    const pad = input.padEdges;
+
+    if (input.pressed('pause') || (pad && pad.pause)) {
+      if (this.state === 'flying') this.pause();
+      else if (this.state === 'paused') this.resume();
+      else if (this.state === 'menu' && this.menus.current !== 'main') this.menus.show('main');
+    }
+    if (this.state !== 'flying') return;
+
+    if (input.pressed('camera') || (pad && pad.camera)) {
+      this.hud.notify(`View: ${VIEW_LABELS[this.rig.cycle()]}`, 'info', 1.8);
+      this.runner.data.cameraChanged = true;
+    }
+    /*
+     * The undercarriage and the flaps are the aeroplane's. The helicopter has
+     * skids and no flaps, and input.js binds its stability-assist key to F in
+     * the 'heli' context while flapsDown keeps F in 'plane' — but pressed()
+     * reads codes, not contexts, so the two handlers both fired. Measured in
+     * the Skyhook: F showed "Flaps 10° — more lift, more drag" beside
+     * "Stability assist off", flapStep() went 1 then 2, and a 40 m/s cruise
+     * settled 1.4 m/s slower at full flap. G put the skids "up", and the
+     * next touchdown was "You landed with the wheels up".
+     */
+    const wings = !SPEC.rotor;
+    if (wings && (input.pressed('gear') || (pad && pad.gear))) {
+      if (!ac.toggleGear()) this.hud.notify('Too fast for the landing gear — slow down first', 'warn', 3);
+    }
+    if (wings && input.pressed('flapsDown')) {
+      const s = ac.setFlaps(ac.flapStep() + 1);
+      this.audio.available && this.audio.ambience.playFlaps();
+      this.hud.notify(`Flaps ${s * 10}° — more lift, more drag`, 'info', 2.4);
+    }
+    if (wings && input.pressed('flapsUp')) {
+      const s = ac.setFlaps(ac.flapStep() - 1);
+      this.audio.available && this.audio.ambience.playFlaps();
+      this.hud.notify(`Flaps ${s * 10}°`, 'info', 2);
+    }
+    if (input.pressed('starter')) this.pressStarter(false);
+    if (input.pressed('brace')) this.braceForImpact();
+    if (this.bracing && !this.braceChoice) {
+      if (input.pressed('emergencyLand')) this.chooseBrace('land');
+      else if (input.pressed('emergencyCircle')) this.chooseBrace('circle');
+    }
+    if (input.pressed('drop') || (pad && pad.drop)) {
+      if (!this.dropCargo()) this.hud.notify('Nothing to drop right now', 'info', 2);
+    }
+    if (input.pressed('help')) this.hud.toggleControls(this.input.bindings, keyLabel, this.helpActions());
+    if (input.pressed('hudMode')) this.hudAction('hudMode');
+    if (input.pressed('guide')) this.toggleGuide();
+    if (input.pressed('autopilot')) this.toggleAutopilot();
+    if (input.pressed('heliAssist') && SPEC.rotor) this.setHeliAssist(ac.hoverAssist === false, true);
+    // The autopilot's own bugs — plane only, so the helicopter's identical
+    // keys (it has none of these, but the context guard is what ctx:
+    // ['plane'] in the registry actually means) never see them.
+    if (this.input.context === 'plane') {
+      if (input.pressed('apHdgLeft')) this.hudAction('apHdgLeft');
+      if (input.pressed('apHdgRight')) this.hudAction('apHdgRight');
+      if (input.pressed('apSpdDown')) this.hudAction('apSpdDown');
+      if (input.pressed('apSpdUp')) this.hudAction('apSpdUp');
+      if (input.pressed('apVsDown')) this.hudAction('apVsDown');
+      if (input.pressed('apVsUp')) this.hudAction('apVsUp');
+    }
+    if (input.pressed('minimap')) this.hudAction('minimap');
+    if (input.pressed('minimapRange')) this.hudAction('minimapRange');
+    if (input.pressed('hideUi')) this.toggleHideUi();
+    if (input.pressed('mute')) this.hudAction('mute');
+  }
+
+  /**
+   * Take the boat or the car out.
+   *
+   * The world is already here — the island, the sea, the runway, the town —
+   * so a boat sim and a car sim are not separate games needing separate
+   * worlds. They are a different thing to be, in the same place, which is a
+   * far better answer than three shallow copies of one engine.
+   */
+  /**
+   * Somewhere to put the ship.
+   *
+   * It was hardcoded at (-5200, 3400) on every map, which is open sea on six
+   * of the nine and dry land on the other three: 43 m up a field on the
+   * grassland, 25 m up the peninsula at San Francisco, and 632 m up a
+   * mountain at the air base. A carrier aground on a hillside is not a thing
+   * anyone should have to see, let alone try to land on.
+   *
+   * A map may name its own berth. Otherwise the default is tried first and, if
+   * that is not water, a ring is walked outward until somewhere deep enough
+   * for the whole deck footprint turns up.
+   */
+  carrierBerth() {
+    /*
+     * A map's own berth if it is wet; otherwise one in deep water, clear of
+     * every runway's approach lanes and in sight of the island — see
+     * world/carrier-berth.js, which scores it.
+     */
+    const b = chooseCarrierBerth({ map: MAP, airport: AIRPORT, heightAt });
+    if (b.why === 'none') console.warn('No water deep enough for the carrier on this map.');
+    return MAP.carrier && b.why === 'map' ? MAP.carrier : { x: b.x, z: b.z };
+  }
+
+  /**
+   * Put back the map the player actually chose.
+   *
+   * Called when a flight ends. Silent when no mission borrowed one.
+   */
+  restoreChosenMap() {
+    const want = this.mapBeforeMission;
+    this.mapBeforeMission = null;
+    if (!want || want === this.settings.map) return;
+    applyMap(want);
+    this.layRoads();
+    refreshRunways();
+    refreshApronElevation();
+    this.settings.map = want;
+    saveSettings(this.settings);
+    this.menus.syncMap(want);
+    this.buildWorld(this.settings.quality);
+  }
+
+  /**
+   * Put a jet on the player's tail.
+   *
+   * Owned by the game rather than by the mission, so it is disposed on every
+   * path that ends a flight — a pursuer left in the scene would carry on
+   * hunting somebody who has gone back to the menu.
+   */
+  /**
+   * A flight of three, close enough to see.
+   *
+   * One aeroplane at 2,200 m was the whole problem: at that range a jet is a
+   * few pixels, so "there is a jet on your tail" was a line of text about
+   * something you could not make out. Three of them, starting inside a
+   * kilometre and spread across your tail, is the difference between being
+   * told you are being chased and being chased.
+   *
+   * The leader is the bomber and the wingmen are fighters, which is also why
+   * the fighters sit wider — they are the ones who will cut you off.
+   */
+  spawnPursuer() {
+    this.clearPursuer();
+    /*
+     * Close. Much closer than feels reasonable on paper.
+     *
+     * Photographed at a kilometre in clear air: a fifteen-metre jet is about
+     * a pixel and a half, and three of them are three pixels. "There is a jet
+     * on your tail" was a caption over an empty sky. At two to three hundred
+     * metres they read as aeroplanes, you can tell a bomber from a fighter,
+     * and looking back actually means something.
+     */
+    const flight = [
+      { id: 'nightjar', at: 240, side: 0, name: 'Ironhead One' },
+      { id: 'vanguard', at: 330, side: -1, name: 'Ironhead Two' },
+      { id: 'vanguard', at: 330, side: 1, name: 'Ironhead Three' },
+    ];
+    this.pursuers = [];
+    for (const f of flight) {
+      const type = getAircraft(f.id);
+      if (!type) continue;
+      const p = new Pursuer(this.scene, createAircraftModel, type, { name: f.name });
+      p.placeBehind(this.aircraft, f.at);
+      // Spread them across your tail rather than stacking them in a line.
+      const across = new THREE.Vector3(f.side * 90, f.side === 0 ? 18 : -14, 0)
+        .applyQuaternion(this.aircraft.quat);
+      p.pos.add(across);
+      this.pursuers.push(p);
+    }
+    // The leader is the one the mission talks about and scores against.
+    this.pursuer = this.pursuers[0] || null;
+    this.traffic = this.pursuers;
+    return this.pursuer;
+  }
+
+  clearPursuer() {
+    for (const p of this.pursuers || []) p.dispose();
+    this.pursuers = [];
+    this.pursuer = null;
+    this.traffic = [];
+  }
+
+  /**
+   * Was that a survivable arrival?
+   *
+   * Three things, and all three are the ones a pilot is taught: wings level,
+   * coming down gently, and not too fast. Over water counts as flat ground —
+   * a ditching into calm sea is the textbook case.
+   */
+  braceSurvivable() {
+    const ac = this.aircraft;
+    const wingsLevel = Math.abs(ac.bankAngleDeg()) < 14;
+    // vel.y, not `vs` — `vs` is a copy taken once per physics step, so at the
+    // moment the crash fires it can still be last frame's number.
+    const gentle = -ac.vel.y < 6.5;
+    const notDiving = ac.pitchAngleDeg() > -12;
+    return wingsLevel && gentle && notDiving;
+  }
+
+  /**
+   * Is something actually wrong with the aeroplane right now?
+   *
+   * Not "low" and not "coming down" — on a mission that is ordinary flying
+   * (every approach is both). A dead engine in the air, a failure, or heavy
+   * damage.
+   */
+  braceEmergency() {
+    const ac = this.aircraft;
+    if (!ac || ac.crashed) return false;
+    const anyFailure = Object.values(ac.failures || {}).some(Boolean);
+    const engineDead = !ac.engineOn && !(ac.starting > 0) && !ac.onGround;
+    return anyFailure || engineDead || ac.worstDamage > 0.3;
+  }
+
+  /**
+   * Is "Brace for impact" on offer at all?
+   *
+   * Free Flight: always, as it always was. On a mission: only when the
+   * mission is about an emergency (`allowBrace: true` on its def) or one is
+   * really happening. A kid flying a normal mission low pressed it once and
+   * the mayday took the plane and ended the mission (owner, 2026-09-30).
+   * When this is false the tray button is hidden, the key does nothing and
+   * the H card does not list it.
+   */
+  braceAvailable() {
+    if (this.bracing) return true;
+    if (this.mode === 'free') return true;
+    if (this.vehicle) return false;
+    const r = this.runner;
+    if (r && r.def && r.def.allowBrace && r.status === STATUS.RUNNING) return true;
+    return this.braceEmergency();
+  }
+
+  /** The controls list for the H card, without the mayday keys when there is no mayday on offer. */
+  helpActions() {
+    // What the H card lists: this vehicle's keys (keybinds), minus brace when
+    // this mission has no use for it.
+    const base = actionsFor(this.input.context);
+    if (this.braceAvailable()) return base;
+    const out = { ...base };
+    delete out.brace;
+    delete out.emergencyLand;
+    delete out.emergencyCircle;
+    return out;
+  }
+
+  /**
+   * Mayday.
+   *
+   * Not a shutdown-and-hit-the-ground drill — that version was wrong. You
+   * hand the aeroplane to the autopilot, it flies a circuit over the field,
+   * two aircraft come up to be with you, and the tower talks to you the whole
+   * way. Then the weather decides.
+   *
+   * The interface stays on screen. Taking it all away made the one moment
+   * where you most want to see what is happening the one moment you could
+   * not.
+   */
+  braceForImpact() {
+    if (this.state !== 'flying' || this.bracing) return;
+    // Not on offer (an ordinary mission, nothing wrong): the key does nothing
+    // at all — no banner, no "press again".
+    if (!this.braceAvailable()) return;
+    const ac = this.aircraft;
+    if (ac.crashed) return;
+    if (ac.onGround && ac.groundSpeed < 4) {
+      this.hud.notify('You are already on the ground', 'info', 2.4);
+      return;
+    }
+
+    /*
+     * Ask twice. It takes the aeroplane out of your hands and cannot be
+     * undone, so one stray keypress should not do it.
+     */
+    /*
+     * Two presses normally. One when you are already in trouble.
+     *
+     * The confirm is there so a stray key cannot take the aeroplane off you —
+     * but "I mostly crash first, then brace" is the whole problem with it:
+     * by the time you have decided, pressed, read the prompt and pressed
+     * again, the ground has arrived. So when the aeroplane is visibly in an
+     * emergency already — low, coming down fast, engine dead, or something
+     * broken — the first press is the decision, because at that point there
+     * is nothing to protect you from.
+     */
+    const ac2 = this.aircraft;
+    const anyFailure = Object.values(ac2.failures || {}).some(Boolean);
+    // On a mission, low and descending is just flying: only a real emergency
+    // skips the confirm there. Free Flight keeps its old, looser rule.
+    const inTrouble =
+      this.mode === 'free'
+        ? ac2.agl < 400 || -ac2.vel.y > 12 || !ac2.engineOn || anyFailure || ac2.worstDamage > 0.3
+        : this.braceEmergency();
+
+    if (!inTrouble && !(this._braceArm > 0)) {
+      this._braceArm = 4;
+      this.hud.showBanner(
+        'Declare an emergency?',
+        'Press it again to commit. In a real emergency one press is enough.',
+        'warn',
+        4
+      );
+      return;
+    }
+    this._braceArm = 0;
+
+    this.bracing = true;
+    this.braceT = 0;
+    this.braceLine = 0;
+    this.braceOdds = this.survivalOdds();
+    this.braceRescue = [];
+
+    /*
+     * A mayday ends the mission — quietly.
+     *
+     * Two scripts were driving the same aeroplane: the mission still counting
+     * down, still moving the marker, still advancing its steps and still
+     * talking on the radio, across sixty seconds of emergency you do not
+     * control. Whatever you were sent to do, you are not doing it now.
+     *
+     * It is stood down rather than failed, because `fail()` puts a "mission
+     * not completed" screen in front of you on the spot — in the middle of
+     * the mayday, before the aeroplane is anywhere. The mayday owns the
+     * ending and says so in its own debrief.
+     */
+    this.abandonedMission = this.runner.standDown();
+    if (this.abandonedMission) {
+      this.activeTarget = null;
+      this.hud.setMissionClock(null);
+      this.hud.setObjective('Emergency', 'The mission is over. Fly the aeroplane.');
+      this.hud.notify(`${this.abandonedMission} is over — fly the aeroplane`, 'warn', 4);
+    }
+
+    /*
+     * Most of the instruments go.
+     *
+     * The panel is dead but the interface is still there — that is the
+     * difference between "the aeroplane is broken" and "the game has taken
+     * the screen away from you", and the first version got it wrong by doing
+     * the second. The autopilot keeps flying regardless, which is why it is
+     * engaged before this.
+     */
+    /*
+     * Order matters: the autopilot first, THEN the panel goes dark.
+     *
+     * The game refuses to engage the autopilot while the instruments are out —
+     * sensible, and exactly backwards here, where the aeroplane flying itself
+     * is the entire point. Blacking the panel out first meant it quietly never
+     * engaged and the aeroplane just carried on wherever it was pointed.
+     */
+    this.autopilot.setMode('field');
+    this.autopilot.setEngaged(true, ac);
+    this.instrumentBlackout = 70;
+    this.hud.setBlackout(true);
+    this.hud.setAutopilot(true, this.autopilot.status(this.activeTarget), this.autopilot);
+    this.braceChoice = null;
+    this.hud.setEmergencyChoice([
+      { key: '1', label: 'Attempt to land', hint: 'Line up with the runway and fly it down', action: 'emergencyLand' },
+      { key: '2', label: 'Circle the airport', hint: 'Hold overhead and wait for help', action: 'emergencyCircle' },
+    ]);
+    // A touch sheet (SYSTEMS has the MAYDAY button) would sit over the card that asks the question.
+    if (this.touch && this.touch.closeSheets) this.touch.closeSheets();
+    this.hud.showBanner('Mayday declared', this.touch ? 'Tap one: attempt a landing, or circle.' : 'Choose: 1 to attempt a landing, 2 to circle.', 'bad', 6);
+    this.audio.available && this.audio.alerts.caution && this.audio.alerts.caution();
+  }
+
+  /**
+   * Land it, or go round and wait.
+   *
+   * Asked rather than decided, because it is the one decision left and it is
+   * a real one: an approach gets you down sooner and needs the aeroplane to
+   * still be flyable, holding overhead buys time for the people coming to
+   * you. Both are correct answers to different situations.
+   */
+  chooseBrace(which) {
+    if (!this.bracing || this.braceChoice) return;
+    this.braceChoice = which;
+    this.hud.setEmergencyChoice(null);
+    if (which === 'land') {
+      this.autopilot.setMode('approach');
+      this.speak('We are going to try for the runway.', 'pilot', 1);
+      this.hud.showBanner('Attempting a landing', 'Lined up for the runway.', 'warn', 4);
+    } else {
+      this.autopilot.setMode('field');
+      this.speak('We will hold overhead and wait for you.', 'pilot', 1);
+      this.hud.showBanner('Holding overhead', 'Circling the field until help arrives.', 'warn', 4);
+    }
+    this.autopilot.setEngaged(true, this.aircraft);
+  }
+
+  /**
+   * How likely this ends well, from the weather you are in.
+   *
+   * Half of it is luck, and the rest is what you are flying through: clear
+   * and calm is survivable, a storm at night is much less so. Rolled once,
+   * when the mayday is declared, so nothing you do afterwards silently moves
+   * it and the number the tower is working with never changes underneath you.
+   */
+  survivalOdds() {
+    const w = this.weather;
+    const cond = w.effectiveCondition || w.condition;
+    let odds = 0.5;
+    if (cond === 'clear') odds += 0.2;
+    else if (cond === 'rainy') odds -= 0.1;
+    else if (cond === 'stormy') odds -= 0.2;
+    if (w.isNight) odds -= 0.1;
+    if (w.windSpeedKts > 22) odds -= 0.1;
+    return Math.max(0.15, Math.min(0.85, odds));
+  }
+
+  /**
+   * The recovery parachute.
+   *
+   * A real thing on real light aircraft — a canopy for the whole aeroplane,
+   * fired before it reaches the ground — and the reason the bad ending is
+   * survivable at all. It is also the part that makes the sequence make
+   * sense to watch: something visibly happens instead of the aeroplane
+   * simply running out of sky.
+   */
+  deployChute() {
+    if (this.chute) return;
+    const canopy = new THREE.Mesh(
+      new THREE.SphereGeometry(9, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
+      new THREE.MeshStandardMaterial({
+        color: 0xff7a3c,
+        roughness: 0.85,
+        side: THREE.DoubleSide,
+      })
+    );
+    canopy.castShadow = true;
+    const rig = new THREE.Group();
+    rig.add(canopy);
+    canopy.position.y = 13;
+    // Four lines back down to the aeroplane.
+    const lineMat = new THREE.MeshStandardMaterial({ color: 0x2a2f36, roughness: 0.7 });
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const l = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 13, 4), lineMat);
+      l.position.set(Math.cos(a) * 2.2, 6.5, Math.sin(a) * 2.2);
+      rig.add(l);
+    }
+    rig.scale.setScalar(0.01);
+    this.scene.add(rig);
+    this.chute = { rig, t: 0 };
+    // Under a canopy it stops flying and starts descending.
+    this.autopilot.setEngaged(false, this.aircraft);
+    this.aircraft.stopEngine('chute');
+    this.audio.available && this.audio.ambience.playFlaps && this.audio.ambience.playFlaps();
+  }
+
+  clearChute() {
+    if (this.chute) this.scene.remove(this.chute.rig);
+    this.chute = null;
+  }
+
+  /** The aircraft that come up to sit with you. */
+  spawnRescue() {
+    const type = getAircraft('courier') || this.aircraftType;
+    for (const side of [-1, 1]) {
+      let m = null;
+      try {
+        m = createAircraftModel({ type });
+      } catch (e) {
+        return;
+      }
+      this.scene.add(m);
+      this.braceRescue.push({ model: m, side, t: 0 });
+    }
+    this.traffic = this.braceRescue.map((r) => ({ pos: r.model.position }));
+  }
+
+  /**
+   * The whole sequence: what is said, when, and how it ends.
+   *
+   * Written as a list of times rather than nested timers so the order is
+   * readable in one go and nothing can fire out of sequence.
+   */
+  updateBrace(dt) {
+    if (this._braceArm > 0) this._braceArm -= dt;
+    // Hidden, not greyed out, whenever it is not on offer (braceAvailable).
+    // Written only on a change: it runs every frame.
+    const offer = this.braceAvailable();
+    if (this.hud.btnBrace && this.hud.btnBrace.hidden === offer) this.hud.btnBrace.hidden = !offer;
+    if (!this.bracing) return;
+    const ac = this.aircraft;
+
+    /*
+     * If the ground got there first, the sequence is over.
+     *
+     * It kept playing across a crash it had not caused — so you hit
+     * something, and then the tower carried on calmly telling you help was
+     * coming while the wreck sat there. The ending belongs to whichever
+     * happened first, and here that is the crash.
+     */
+    if (ac.crashed && !this.braceRescueT) {
+      this.bracing = false;
+      this.braceOwnsEnding = false;
+      this.clearRescue();
+      this.clearChute();
+      this.autopilot.setEngaged(false, ac);
+      return;
+    }
+    this.braceT += dt;
+    const t = this.braceT;
+    const call = this.atc ? this.atc.callsign : 'Skylark one seven two';
+    const field = this.atc ? this.atc.field : 'Kestrel';
+
+    const SCRIPT = [
+      [0.5, () => this.speak(`Mayday, mayday, mayday. ${call}. I need help.`, 'pilot', 1)],
+      [4.5, () => this.speak(`${call}, ${field} Tower. We have you. We are staying with you.`, 'tower', 1)],
+      [11, () => this.speak('Everything else on the field is holding. The sky is yours.', 'tower')],
+      [18, () => {
+        this.spawnRescue();
+        this.speak('Two aircraft are coming up to you now. You will not be on your own.', 'tower');
+      }],
+      [27, () => this.speak(`${call}, Rescue One. I have you in sight. Keep the turn going — we will go round with you.`, 'approach')],
+      [36, () => this.speak('Everything down here is ready. We have been ready since you called.', 'tower')],
+      [45, () => this.speak('Whatever happens next — you flew it well. All of us saw it.', 'tower', 1)],
+      [49, () => {
+        this.deployChute();
+        this.speak('Parachute out. Hands off, let it come down.', 'approach', 1);
+        this.hud.showBanner('Parachute out', 'Nothing left to do but hold on.', 'warn', 5);
+      }],
+      [58, () => this.resolveBrace()],
+    ];
+    while (this.braceLine < SCRIPT.length && t >= SCRIPT[this.braceLine][0]) {
+      SCRIPT[this.braceLine][1]();
+      this.braceLine++;
+    }
+
+    /*
+     * Under the canopy: it blossoms over a second, sits above the aeroplane,
+     * and the descent settles to about five metres a second — which is what a
+     * recovery parachute actually gives you, and slow enough to be survivable.
+     */
+    if (this.chute) {
+      this.chute.t += dt;
+      const open = Math.min(1, this.chute.t * 1.4);
+      this.chute.rig.scale.setScalar(open);
+      this.chute.rig.position.copy(ac.pos);
+      ac.vel.y += (-5 - ac.vel.y) * Math.min(1, dt * 1.6 * open);
+      ac.vel.x *= 1 - Math.min(1, dt * 0.8 * open);
+      ac.vel.z *= 1 - Math.min(1, dt * 0.8 * open);
+      // Wings level under the canopy, because the canopy is holding it.
+      ac.omega.multiplyScalar(1 - Math.min(1, dt * 3));
+    }
+
+    // The rescue pair, tucked in either side of you.
+    for (const r of this.braceRescue) {
+      const off = new THREE.Vector3(r.side * 34, -4, 26).applyQuaternion(ac.quat);
+      r.model.position.lerp(this._tmpV.copy(ac.pos).add(off), Math.min(1, dt * 1.4));
+      r.model.quaternion.slerp(ac.quat, Math.min(1, dt * 2));
+      if (r.model.userData.update) {
+        r.model.userData.update(dt, {
+          controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.7, brakes: 0 },
+          rpm: 0.7, flaps: 0, gearPos: 0, gearDown: false, onGround: false,
+          groundSpeed: 0, engineOn: true, agl: 500, alt: r.model.position.y,
+          vel: ac.vel, pos: r.model.position, quat: r.model.quaternion,
+        }, { isNight: !!this.weather.isNight, cond: { cloud: 0 } });
+      }
+    }
+  }
+
+  /**
+   * The moment it is decided.
+   *
+   * Nobody is ever lost. The weather decides whether it goes well or badly,
+   * and badly means the aeroplane is wrecked and the emergency services get
+   * you out of it — which is what actually happens, and is a far better thing
+   * for a ten-year-old to take away than a coin flip on whether they died.
+   *
+   * What is at stake is the aeroplane and how hard it was, not the crew.
+   */
+  resolveBrace() {
+    const made = Math.random() < this.braceOdds;
+    const call = this.atc ? this.atc.callsign : 'Skylark one seven two';
+    const field = this.atc ? this.atc.field : 'Kestrel';
+    const pct = Math.round(this.braceOdds * 100);
+    this.bracing = false;
+    this.autopilot.setEngaged(false, this.aircraft);
+
+    if (made) {
+      this.clearRescue();
+      this.clearChute();
+      this.speak(`${call}, you are down. Everybody is out and everybody is fine.`, 'tower', 1);
+      this.showBraceDebrief({
+        title: 'Everyone walked away',
+        kind: 'good',
+        lead: 'You called it early, you let the aeroplane fly itself, and the two who came up brought you home.',
+        body: 'The aeroplane is a write-off. Nobody is hurt. That is the whole job.',
+        pct,
+      });
+      return;
+    }
+
+    /*
+     * It went badly — and then the fire crews reach you.
+     *
+     * The aeroplane is put down hard rather than the flight simply being
+     * declared over, so what you see matches what you are told.
+     */
+    this.speak(`${call}, ${field} Tower. Brace, brace, brace.`, 'tower', 1);
+    this.aircraft.crash('The aeroplane came down short', {
+      worldPoint: this.aircraft.pos.clone(),
+      part: 'fuselage',
+    });
+    this.hud.showBanner('It is down — help is already moving', 'Stay with it.', 'warn', 4);
+    this.braceRescueT = setTimeout(() => {
+      this.speak('They have reached you. You are out and you are safe.', 'tower', 1);
+      this.clearRescue();
+      this.clearChute();
+      this.showBraceDebrief({
+        title: 'They got you out',
+        kind: 'warn',
+        lead: 'It came down hard and the emergency services were there inside a minute.',
+        body:
+          'The aeroplane is gone. You are not. Clear weather and daylight give you a far better '
+          + 'chance of the other ending — that is why the weather is the first thing a pilot looks at.',
+        pct,
+      });
+    }, 4200);
+  }
+
+  /** One debrief for both endings, so they cannot drift apart. */
+  showBraceDebrief({ title, kind, lead, body, pct }) {
+    this.state = 'debrief';
+    this.hud.setVisible(false);
+    // If a mayday ended a mission, the debrief is the place that says so —
+    // nothing interrupts the emergency itself to announce it.
+    const abandoned = this.abandonedMission
+      ? `<p class="hint tiny">${this.abandonedMission} was abandoned when you declared the emergency. `
+        + 'Declaring one is never the wrong call; the mission will still be there.</p>'
+      : '';
+    this.abandonedMission = null;
+    this.menus.showDebrief({
+      title,
+      kind,
+      body:
+        `<p class="debrief-reason">${lead}</p><p>${body}</p>`
+        + `<p class="hint tiny">Today's weather gave you about a ${pct}% chance of walking away from it.</p>`
+        + abandoned,
+      actions: [
+        { label: 'Fly again', onClick: () => this.restart(), primary: true },
+        { label: 'Main menu', onClick: () => this.quitToMenu('main') },
+      ],
+    });
+  }
+
+  clearRescue() {
+    for (const r of this.braceRescue || []) this.scene.remove(r.model);
+    this.braceRescue = [];
+    this.traffic = [];
+  }
+
+  /**
+   * Tell the HUD the minimap is there.
+   *
+   * On a narrow screen the minimap sits in the top-left corner, and the
+   * objective panel is centred and wide enough to run straight under it — the
+   * instrument strip had already been moved out of the way, the objective had
+   * not. The class is what lets the panel step aside only when there is
+   * something to step aside for.
+   */
+  syncMinimapClass() {
+    if (this.hud && this.hud.wrap) {
+      this.hud.wrap.classList.toggle('has-minimap', !!(this.minimap && this.minimap.visible));
+    }
+  }
+
+  startDrive(kind = 'boat', opts = {}) {
+    const spec = VEHICLES[kind] || VEHICLES.boat;
+    this.wakeAudio();
+    this.menus.hide();
+    this.hud.setVisible(true);
+    this.hud.clearTransient();
+    this.taxi.stop();
+    this.wreck.clear();
+    /*
+     * Leave the aeroplane properly, not just stop drawing it.
+     *
+     * Taking the boat out used to leave the autopilot engaged, a tornado on
+     * the map and the mission runner's objective still on the HUD, because
+     * nothing here undid them — you got in a boat and the game carried on
+     * telling you to fly through a ring. Anything armed for the flight has to
+     * be stood down, or it is waiting for you when you come back.
+     */
+    this.autopilot.setEngaged(false, this.aircraft);
+    this.hud.setAutopilot(false);
+    this.hud.hideControls();
+    this.tornado.clear();
+    this.atc.reset();
+    this.removeCrate();
+    this.hasCargo = false;
+    this.armed = {};
+    this.armedEvents = {};
+    this.activeEvents = {};
+    this.randomDisasters = false;
+    // Rings belong to the flight you left. Setting the runner idle is not the
+    // same as taking them down, so they used to hang in the sky over the boat.
+    this.runner.clearGates && this.runner.clearGates();
+    this.mode = 'drive';
+    this.modeOpts = { kind, ...opts };
+    this.game = kind;
+    this.state = 'flying';
+    this.runner.status = 'idle';
+    this.menus.setGame(kind);
+
+    if (this.vehicleModel) {
+      this.scene.remove(this.vehicleModel);
+      this.vehicleModel = null;
+    }
+    this.vehicle = new SurfaceVehicle(kind);
+    this.vehicleModel = kind === 'boat' ? createBoat() : createCar();
+    // Her pose is surface.js's; the hull that draws her says where its deck
+    // edge and bottom are and how far it lifts onto the plane (the Blender
+    // launch does; the pack launch leaves the spec's numbers, which are its).
+    if (kind === 'boat') this.vehicle.fitHull(this.vehicleModel.userData.hullFit || null);
+    this.scene.add(this.vehicleModel);
+
+    /*
+     * Driving gets its own pedals and its own camera.
+     *
+     * Both are rebuilt per trip rather than kept on the sim, so that stepping
+     * out of the van and back in never leaves a latched pedal, a camera half
+     * way across the island or a reverse gear you did not select.
+     */
+    /*
+     * By what the spec IS, not by its name: anything built as a copy of the
+     * van's spec drives as the van does. Asked for by name, a tug copied
+     * from the van got no pedals and no camera — measured, four seconds of
+     * Shift moved it 6 cm, and the camera stayed wherever the walk left it.
+     */
+    const carLike = kind !== 'boat' && spec.kind === 'car';
+    this.driveInput = carLike ? new DriveInput(this.input) : null;
+    this.driveCam = carLike ? new DriveCamera() : null;
+    if (this.touch) {
+      installDriveTouch(this.touch);
+      if (this.touch.setMode) this.touch.setMode(carLike ? 'drive' : 'fly');
+      if (this.touch.setBoatMode) this.touch.setBoatMode(kind === 'boat');
+    }
+    // The two things the boat says once per outing, not once per frame.
+    this._slamSaid = false;
+    this._waySaid = false;
+    this._swampSaid = false;
+    this._droveInto = false;
+
+    /*
+     * Where the trip starts.
+     *
+     * It used to be two hard-coded points that were right for Kestrel and
+     * wrong everywhere else: the boat spawned in open water off a beach that
+     * on Longbank Sands is two kilometres out on a drying bank, and the car on
+     * an apron that only exists because every map happens to have one. Now a
+     * mission says where it begins; failing that the boat starts at the quay
+     * and the van at the depot, both of which the map itself declares.
+     */
+    const def = this.defForDrive(opts);
+
+    /*
+     * A mission's own map, loaded before the vehicle is put down on it.
+     *
+     * startMode has done this for the aeroplane since the beginning; startDrive
+     * never did. A boat mission that says `map: 'sennen'` started on whatever
+     * map you happened to be on, and boatSpawnFor read THAT map's harbour — so
+     * the first shout began two kilometres out in the wrong bay, and the quay
+     * it was about to send you back to was on a different island.
+     *
+     * Borrowed, not kept: the map you chose is put back when you step out of
+     * the boat, exactly as it is for a flight.
+     */
+    const wantMap = (def && def.map) || this.mapForGame(kind);
+    if (wantMap && this.settings.map !== wantMap) {
+      this.mapBeforeMission = this.settings.map;
+      applyMap(wantMap);
+      this.layRoads();
+      refreshRunways();
+      refreshApronElevation();
+      this.settings.map = wantMap;
+      this.menus.syncMap(wantMap);
+      this.buildWorld(this.settings.quality);
+    }
+
+    let start = null;
+    let headingDeg = kind === 'boat' ? 250 : 90;
+    if (kind === 'boat') {
+      /*
+       * The shout's own weather.
+       *
+       * Every boat mission names a sky — First Shout a clear day with 7 kt
+       * from 240, Night Shout two in the morning, In the Gale 28 kt and a
+       * storm — and nothing ever loaded it: startMode does it for the
+       * aeroplane and this function never did. Measured: First Shout's HUD
+       * read "0 kt from 090°", and Night Shout and In the Gale simply ran in
+       * whatever sky the last thing had left up.
+       */
+      // Borrowed, like the map: BoatHud.leave() puts the player's own weather
+      // back, so a Night Shout does not leave the next flight in the dark.
+      if (def && def.weather) {
+        if (!this._weatherBeforeBoat) this._weatherBeforeBoat = this.weather.serialize();
+        this.weather.load(def.weather);
+      } else if (this._weatherBeforeBoat) {
+        this.weather.load(this._weatherBeforeBoat);
+        this._weatherBeforeBoat = null;
+      }
+      /*
+       * boatSpawnFor takes the SIM, not the mission.
+       *
+       * It reads the harbour out of the loaded map and puts her alongside the
+       * quay pointing at the mouth. Handing it a mission definition instead
+       * silently gave the wrong answer rather than throwing: the launch started
+       * 557 m out in the bay, which for a game whose first lesson is leaving a
+       * berth is most of the lesson gone.
+       */
+      const sp = boatSpawnFor(this);
+      if (sp && sp.pos) {
+        start = sp.pos;
+        headingDeg = sp.headingDeg ?? headingDeg;
+      } else {
+        const berth = harbourBerth();
+        start = berth ? new THREE.Vector3(berth.x, 0, berth.z) : new THREE.Vector3(-3400, 0, 900);
+        const mouth = harbourMouth();
+        if (berth && mouth) {
+          headingDeg = (Math.atan2(mouth.x - berth.x, -(mouth.z - berth.z)) * 180) / Math.PI;
+        }
+      }
+    } else {
+      /*
+       * resolveSpawn puts the van ON the road, facing along the route to the
+       * first place the job goes (see its note in jobs.js). The snapping that
+       * used to be here faced it along whichever road segment was nearest,
+       * which at a junction is any of them.
+       */
+      const sp = resolveSpawn(this, def || ISLAND_ROADS);
+      if (sp && sp.pos) {
+        start = sp.pos;
+        headingDeg = sp.headingDeg ?? headingDeg;
+      } else {
+        start = new THREE.Vector3(-430, 0, -95);
+      }
+    }
+    this.vehicle.reset({ pos: start, headingDeg });
+    // The island made ready for the van and the van put down on it, its
+    // marker, arrow and sky (IslandRoads.van.start in jobs.js).
+    if (carLike) IslandRoads.van.start(this, { kind, def, start, headingDeg });
+    this.model.visible = false;
+    this.hud.setAircraftName(spec.name);
+    this.hud.setObjective(spec.name, spec.blurb);
+
+    // The panel for whichever of the two this is. Built lazily and shown here;
+    // the aeroplane's rows are hidden rather than relabelled, which is what the
+    // altimeter-reading-kilometres bug was.
+    /*
+     * And take the other game's panel down first.
+     *
+     * Switching straight from the boat to the van never goes through
+     * stopDrive — switchGame calls startDrive again — so without this the HUD
+     * ends up wearing `is-boat` and `is-drive-car` at once, with a depth
+     * sounder over the top of a delivery clock. Measured, not imagined: that
+     * is exactly what the classList read after one switch.
+     */
+    if (kind === 'boat') {
+      if (this.driveHud) this.driveHud.exit();
+      this.boatHud = this.boatHud || new BoatHud(this.hud);
+      this.boatHud.enter(spec, this);
+      /*
+       * What the aeroplane left standing in the sky.
+       *
+       * The flight's guidance is ticked only by the flight loop, so the beacon
+       * and the rails stayed wherever the last flight had them — over a
+       * runway five kilometres away, pointing the wrong way, for the whole of
+       * the boat trip. The boat has its own arrow.
+       */
+      if (this.beacon) this.beacon.setTarget(null);
+      if (this.navGuide) this.navGuide.update(0, null, this.aircraft.pos, this.aircraft.quat, this.camera.position);
+      this.activeTarget = null;
+      // Put the camera straight on her; see the boat camera in updateDrive.
+      this._boatCamSnap = true;
+      this._boatArrowSteer = 0;
+    } else {
+      if (this.boatHud) this.boatHud.leave();
+      this.driveHud = this.driveHud || new DriveHud(this.hud);
+      this.driveHud.enter(spec, { audio: this.audio });
+    }
+
+    // A mission or a job rides the same runner the aeroplane's do.
+    if (def) {
+      this.runner.start(def);
+      /*
+       * And the turn arrow gets its route.
+       *
+       * First Run's own text says "Follow the arrow to the town" and its hint
+       * says "The big arrow at the bottom of the screen is the next turn". The
+       * tracker that draws that arrow was built and never given a route, so
+       * there was no arrow — the game told a ten-year-old to follow something
+       * that was not there, on the first job of the first game they play.
+       */
+      if (this.driveHud && this.driveHud.tracker && typeof def.route === 'function') {
+        try {
+          this.driveHud.tracker.setRoute(def.route(this));
+        } catch (err) {
+          console.warn('This job could not work out its route:', err);
+        }
+      }
+      this.islandRoads = null;
+    } else if (carLike) {
+      // Free drive's places to find are the courier's. A tug on the apron is
+      // not out finding the island, and it must not fall through to the
+      // boat's patrol below, which it used to.
+      this.islandRoads = kind === 'car' ? new IslandRoads(this) : null;
+    } else {
+      this.islandRoads = null;
+      /*
+       * Only a boat goes on the lifeboat patrol. Anything else that gets
+       * here drives like the van — the airport's tug and baggage tractor,
+       * started as startDrive('tug') by the plug-in layer with a spec copied
+       * from VEHICLES.car — and this bare `else` started the PATROL for it:
+       * a Coastguard "Out you go" and a casualty in the sea somewhere, for a
+       * pushback tug. It gets no mission of ours; whoever started it owns
+       * what it is for.
+       */
+      if (this.vehicle.isBoat) this.runner.start(BOAT_PATROL);
+    }
+
+    this.hud.notify(
+      kind === 'boat'
+        ? 'Tap W or Shift to go faster, S or Ctrl to slow down — the lever has five steps, Astern to Full. A and D steer. Follow the arrow. She keeps going when you slow down, so ease off early.'
+        : 'W, Up or Shift to go. S, Down or Ctrl to brake — keep holding it once you have stopped and you reverse. A and D (or the arrows) steer, Space is the handbrake, C changes the view.',
+      'info',
+      8
+    );
+    // The camera behind the van, the arrow on its road and the panel and map
+    // drawn before the first frame (IslandRoads.van.firstFrame).
+    if (carLike) IslandRoads.van.firstFrame(this);
+    extStartMode(this, 'drive', { kind, ...opts });
+    return this.vehicle;
+  }
+
+  /**
+   * Back to the aeroplane.
+   *
+   * This existed and was never called, which is why an abandoned boat sat off
+   * the beach for the rest of the session once you had taken it out: startMode
+   * made the aeroplane visible again but nothing ever removed the hull.
+   */
+  stopDrive() {
+    if (this.vehicleModel) {
+      this.scene.remove(this.vehicleModel);
+      this.vehicleModel = null;
+    }
+    this.vehicle = null;
+    this.model.visible = true;
+    this.hud.clearVehicle();
+    // leave() also puts back anything the boat trip hid (see BoatHud.enter).
+    if (this.boatHud) this.boatHud.leave();
+    this._boatCamSnap = false;
+    if (this.driveHud) this.driveHud.exit();
+    clearBoatProps(this);
+    this.islandRoads = null;
+    /*
+     * Put the camera back exactly as it was found.
+     *
+     * The driving camera opens the field of view out to 80 degrees at speed,
+     * and it writes camera.fov every frame. Nothing else in the game ever
+     * writes it back — which is the same shape of bug as the altimeter that
+     * read kilometres for the rest of the session after one trip in the boat.
+     * Without this line, one fast delivery leaves every subsequent flight
+     * looking through a fisheye.
+     */
+    if (this.driveCam) this.driveCam.restore(this.camera);
+    this.driveCam = null;
+    this.driveInput = null;
+    if (this.touch) {
+      if (this.touch.setMode) this.touch.setMode('fly');
+      if (this.touch.setBoatMode) this.touch.setBoatMode(false);
+    }
+    // After a van: its marker, its arrow and the sky its job borrowed.
+    if (this.courierGuide) IslandRoads.van.stop(this);
+  }
+
+  /**
+   * Start whatever kind of thing this mission is.
+   *
+   * Twelve of the thirty-one are aeroplane missions and go through startMode;
+   * six are boat shouts, six are courier jobs and seven are helicopter
+   * missions. The helicopter's are still flights — the Skyhook is an aircraft
+   * type, not a mode — so only the boat's and the car's take the other door.
+   */
+  startAnyMission(id) {
+    const def = findMission(id);
+    if (def && def.vehicle === 'boat') return this.launchDrive('boat', { mission: id });
+    if (def && def.vehicle === 'car') return this.launchDrive('car', { job: id });
+    return this.startMode('mission', { id });
+  }
+
+  /**
+   * A drive started from a button: behind the map's loading screen when there
+   * is one. startDrive() itself stays what it was — synchronous, so the code
+   * that starts a drive and carries on with the van or the launch at once
+   * (the race, a multiplayer join) still can. Only the buttons come here.
+   */
+  launchDrive(kind, opts = {}) {
+    const L = this.loading;
+    if (L && L.wanted()) {
+      let plan = null;
+      try {
+        plan = L.planDrive(kind, opts);
+      } catch (err) {
+        console.warn('[loading-screens] could not plan the drive; starting without the screen', err);
+      }
+      if (plan) return L.around(plan, () => this.startDrive(kind, opts));
+    }
+    return this.startDrive(kind, opts);
+  }
+
+  /**
+   * The switcher in the menu bar.
+   *
+   * Four games, one world. Flight and Heli are the same engine with a
+   * different airframe — the Skyhook is an aircraft type, not a mode — so both
+   * go through startMode(); the boat and the car are a different thing to be
+   * and go through startDrive(). Whichever way it goes, the other side is torn
+   * down first, because the bug this replaces was a boat and an aeroplane
+   * existing at the same time.
+   */
+  switchGame(id) {
+    if (!GAME_IDS.includes(id)) id = 'flight';
+
+    /*
+     * Switching games goes to that game's FRONT PAGE. It does not start it.
+     *
+     * It used to drop you straight in: press Boat and you were suddenly
+     * afloat, mid-water, with a mission already running and no way back except
+     * Esc and a quit. That is not a switcher, it is a trapdoor — and the whole
+     * point of four games is that each one is its own place with its own
+     * missions, its own maps and its own way in. You arrive at the door, not
+     * in the middle of the room.
+     *
+     * So: put away whatever is running, then show that game's home screen and
+     * let the player choose from it.
+     */
+    this.stopDrive();
+    this.game = id;
+
+    /*
+     * The vehicle the game is about, chosen now rather than at the moment you
+     * press Go — because the screens behind this one say what you are about to
+     * fly. Pressing Free Flight on the Rotors page and getting a Skylark is
+     * the same bug as the map cards saying how long the runway is on a map
+     * with no runway.
+     */
+    if (id === 'heli') {
+      this.menus.chosenAircraft = 'harrier';
+    } else if (id === 'flight' && isHelicopter(getAircraft(this.menus.chosenAircraft))) {
+      // Coming back from the helicopter must not silently leave you in it.
+      this.menus.chosenAircraft = 'skylark';
+    }
+    /*
+     * Remembered, not built.
+     *
+     * setAircraft() builds a model, and from the front page there is no
+     * aeroplane yet — `this.aircraftType` is undefined until a flight starts,
+     * which is deliberate and documented at the fleet-models option. So the
+     * choice is recorded here and startMode() picks it up when something
+     * actually begins. Calling setAircraft from a menu button threw on the
+     * first press of Heli from a cold start.
+     */
+
+    // And out to the front page. quitToMenu puts back a borrowed map, stands
+    // the runner down and hides the HUD, which is everything a flight leaves
+    // lying about.
+    this.quitToMenu('main');
+    this.menus.setGame(id);
+    return null;
+  }
+
+  /**
+   * The world the Free Flight screen is currently set to — weather, wind, time
+   * of day, fuel — so hopping between the four games does not reset the sky
+   * underneath you each time.
+   *
+   * Deliberately the world and NOT the armed failures or disasters: those were
+   * set up for a particular flight, and having an engine quit on you two
+   * minutes after you picked the helicopter, because of a box you ticked for
+   * something else, is not a surprise anyone enjoys.
+   */
+  freeOpts() {
+    try {
+      const all = this.menus.readFree ? this.menus.readFree() : {};
+      const { fuel, time, condition, windSpeedKts, windDirDeg } = all;
+      return { fuel, time, condition, windSpeedKts, windDirDeg };
+    } catch (e) {
+      console.warn('Could not read the Free Flight settings; using defaults.', e);
+      return {};
+    }
+  }
+
+  /**
+   * One frame of the surface games.
+   *
+   * What this replaces, and why each piece had to go:
+   *
+   *   `throttle: ctrl.throttle * 2` — the aeroplane's throttle LEVER, doubled
+   *   and then clamped to 1 inside the vehicle. So the top half of the lever
+   *   did nothing, the bottom half was twice as sensitive as the on-screen
+   *   slider claimed, and the demand could never go below zero: ASTERN, which
+   *   is written in the physics and commented and clamped for, could not be
+   *   asked for by any input device the game has. The one manoeuvre that
+   *   actually stops a boat was unreachable.
+   *
+   *   `steer: ctrl.roll` — the aileron spring, which recentres at a fixed rate
+   *   regardless of speed. A car needs the wheel to wind on more slowly the
+   *   faster it goes, or a child taps a key at 90 km/h and is in the sea.
+   *
+   *   one camera for both: fixed distance, looking at the vehicle rather than
+   *   where it is going, and ignoring the sea entirely.
+   */
+  updateDrive(dt) {
+    const v = this.vehicle;
+    if (!v) return;
+    // The boat steers with her own keys (Settings → Boat), through the same
+    // springs the aeroplane's roll uses; the van reads its own in driving.js.
+    const ctrl = this.input.update(dt, { simple: true, map: v.isBoat ? BOAT_MAP : null });
+
+    if (v.isBoat) {
+      const touch = this.input.touch;
+      /*
+       * The arrow keys steer her too.
+       *
+       * Up and Down already work the lever (they are bound with Shift and
+       * Ctrl), so a child who finds the arrows first gets her going with Up
+       * and then presses Left and Right — which were bound only to free look,
+       * off by default, so they did nothing at all. Measured: ten seconds of
+       * ArrowRight at Half turned her 0 degrees. They are now among the
+       * boat's own Steer left / Steer right keys, wound on and let back by
+       * input.js exactly as A and D are; with free look on they stay the
+       * camera's (Input.update leaves a look key alone while it is).
+       */
+      const inp = this.input;
+      this._boatArrowSteer = 0;
+      /*
+       * One controls object for the whole trip. This built two new objects a
+       * frame (the controls and the lever keys inside them) for as long as
+       * she was afloat; surface.js reads every field on the frame it is given
+       * them and keeps none of them.
+       */
+      const bc = this._boatControls || (this._boatControls = { steer: 0, lever: { up: false, down: false }, leverIndex: null, crashStop: false, weather: null });
+      bc.steer = clamp(ctrl.roll, -1, 1);
+      // held(), not pressed(): the vehicle does its own edge detection and
+      // its own hold-to-repeat, so one tap is one detent and holding the
+      // key walks the lever at four detents a second.
+      /*
+       * And W and S work the lever too. W is "go" in every other game a
+       * ten-year-old has played, and it is "go" in the van; in the boat it
+       * was bound to the aeroplane's elevator and did nothing at all.
+       * Measured: ten seconds of W from the berth, lever STOP, 0 m moved.
+       * W is faster, S is slower, exactly as Shift and Ctrl are.
+       */
+      bc.lever.up = inp.held('boatFaster');
+      bc.lever.down = inp.held('boatSlower');
+      // The on-screen lever names a detent outright; it wins while a finger
+      // is on it, exactly as the touch throttle already does for the plane.
+      bc.leverIndex = touch && touch.lever != null ? touch.lever : null;
+      bc.crashStop = inp.held('boatStop') || !!(touch && touch.brakes);
+      // The sea is only as big as the weather says it is. Passing the whole
+      // object rather than a number keeps surface.js out of the weather
+      // model and means gusts and temporary storms are felt without another
+      // line here.
+      bc.weather = this.weather;
+      v.update(dt, bc);
+      this.boatFeedback(v);
+      if (this.touch && this.touch.updateBoat) this.touch.updateBoat(v);
+      /*
+       * The world around her, which only the flight loop ever ticked.
+       *
+       * The sea followed the parked aeroplane, the broken water over the
+       * shoals stood still, the lighthouse never swept (Night Shout's last
+       * instruction is to steer by it), and the rain and cloud of In the Gale
+       * were frozen wherever the last flight left them.
+       */
+      if (this.ocean) {
+        this.ocean.follow(v.pos);
+        if (this.ocean.boatView) this.ocean.boatView(v.pos);
+      }
+      if (this.seamarks) this.seamarks.update(dt, this.weather);
+      if (this.scenery) {
+        this.scenery.update(dt, this.weather);
+        if (this.scenery.lod) this.scenery.lod(this.camera.position);
+      }
+      updateSurfaces(this.weather, dt);
+      if (this.clouds) this.clouds.update(dt, this.weather, this.camera.position);
+      if (this.rain) this.rain.update(dt, this.weather, this.camera.position, v.vel);
+      /*
+       * Where the shout is, for the arrow and the chart.
+       *
+       * The minimap draws `activeTarget`, and only the flight loop set it, so
+       * in the boat the chart had no mark on it and the HUD arrow the step
+       * text talks about did not exist. Ten times a second, not sixty: a
+       * target step allocates, and a casualty does not move that fast.
+       */
+      this._boatTargetT = (this._boatTargetT || 0) - dt;
+      if (this._boatTargetT <= 0) {
+        this._boatTargetT = 0.1;
+        this.activeTarget = this.runner.activeTarget();
+      }
+    } else {
+      /*
+       * Rain takes away grip, and it takes it away from cornering and braking
+       * rather than from acceleration. One number, read from the weather that
+       * is already being simulated. Full storm costs 22% of the grip.
+       */
+      const rain = (this.weather && this.weather.cond && this.weather.cond.rain) || 0;
+      v.wet = 1 - 0.22 * Math.min(1, rain);
+      // A world rebuilt under the van (Graphics quality, from the pause menu).
+      IslandRoads.van.world(this);
+      const c = this.driveInput
+        ? this.driveInput.update(dt, v.speed)
+        : { throttle: 0, brake: 0, steer: 0, handbrake: false };
+      v.update(dt, c);
+      if (this.islandRoads) this.islandRoads.update();
+      // The arrow's road route and the drop-off marker, to wherever the job
+      // wants the van now.
+      IslandRoads.van.frame(this, dt, v);
+    }
+
+    this.vehicleModel.position.copy(v.pos);
+    /*
+     * The launch's origin IS her waterline: the pack draws her keel 0.53 m
+     * below it and her deck 0.39 m above, which is a planing launch floating
+     * right. There used to be a further 0.42 m taken off here, from a time
+     * when the vehicle rode 0.18 m up. Measured over five seconds at the
+     * berth with it (boat-playtest P3): keel 0.73 to 1.24 m down and the deck
+     * edge as much as 0.35 m UNDER the opaque sea plane, so only the console
+     * showed — "she looks sunk". Nothing is taken off now; see heaveShown in
+     * surface.js.
+     *
+     * The Blender launch (tools/blender/kestrel-launch) is also drawn with
+     * its origin on the design waterline, so it takes nothing off either.
+     * Her whole pose — the heave she shows, her lift onto the plane, trim,
+     * heel and the keep-dry lift — is the vehicle's, from her own hull's
+     * numbers (fitHull, in startDrive); nothing after this line moves her.
+     *
+     * A model that is NOT drawn with its waterline at its origin says where
+     * it is instead, as `userData.waterline` — the height of the waterline
+     * above the model's origin, in metres (createBoat sets 0). A hull from
+     * Blender with its origin on the keel and 0.5 m of draught sets 0.5 and
+     * floats right with no change here.
+     */
+    if (v.isBoat) this.vehicleModel.position.y -= this.vehicleModel.userData.waterline || 0;
+    this.vehicleModel.quaternion.copy(v.quat);
+    updateVehicleModel(this.vehicleModel, v, dt);
+    // Hide the van while the recovery truck has it, rather than drawing it
+    // bobbing in the surf for two and a half seconds.
+    this.vehicleModel.visible = !(v.swamped && v.recoverT < 2.1);
+
+    /* ---- the chase camera ---- */
+    if (extCamera(this, dt)) {
+      // A feature has the camera this frame — walking about on the apron, say.
+    } else if (!v.isBoat && this.driveCam) {
+      this.driveCam.update(this.camera, v, dt);
+    } else {
+      const r = (v.heading * Math.PI) / 180;
+      const sp = Math.abs(v.speed);
+      // Stand off further the faster she goes: close enough alongside the quay
+      // to judge a metre, far enough at speed to see what you are steering at.
+      /*
+       * And low enough that she sits in the clear band of the screen. From
+       * 11 m back and 5 m up, looking at a point 1.2 m up and 8 m ahead of
+       * her, the launch sat at 35% below the middle of the 62-degree frame,
+       * hull reaching to 74% — measured at 1280x800, the radio subtitle
+       * (518-594 px) was drawn across her stern for every call, and the
+       * top HUD (to 270 px) leaves nothing above her for her to sit in
+       * anyway. 12.5 m back and 4.4 m up, looking 0.8 m up and 9 m ahead,
+       * puts her middle about a quarter of the way down from the centre,
+       * above the subtitle, with the horizon still under the objective
+       * panel; a lower eye is also a flatter look along the water, which is
+       * what makes the swell read as a swell from a boat.
+       */
+      const back = 12.5 + sp * 0.5;
+      const up = 4.4 + sp * 0.12;
+      // Ride some of the swell. All of it is seasickness, none of it is a
+      // photograph of a boat pasted on a moving sea.
+      const heave = (v.heave || 0) * 0.55;
+      // One vector for the life of the sim: this ran a `new` every frame.
+      const want = this._boatCamWant || (this._boatCamWant = new THREE.Vector3());
+      want.set(
+        v.pos.x - Math.sin(r) * back,
+        Math.max(v.pos.y + up + heave, 2),
+        v.pos.z + Math.cos(r) * back
+      );
+      // A knock when she hits something or falls off a wave. Small, brief, and
+      // it uses the vehicle's own decaying jolt so there is no timer here.
+      const j = v.jolt || 0;
+      if (j > 0.01) {
+        // (Reduce flashing: on a slower clock, under 3 Hz — flash-safety.js.)
+        const jt = shakeClock(v.t);
+        want.x += Math.sin(jt * 47) * j * 0.5;
+        want.y += Math.sin(jt * 53 + 1.7) * j * 0.42;
+      }
+      /*
+       * On the boat at once, not a second later.
+       *
+       * The camera eased in from wherever the aeroplane's had been — on a new
+       * map, a different island — so the first second of every shout was a
+       * sweep across somewhere else — measured on the first frame of First
+       * Shout, the camera was 175 m from the boat. The first frame of a
+       * trip, and any frame where the camera is somehow a long way off (a map
+       * rebuild, a teleport by a test), it goes straight there.
+       */
+      if (this._boatCamSnap || this.camera.position.distanceToSquared(want) > 80 * 80) {
+        this._boatCamSnap = false;
+        this.camera.position.copy(want);
+      } else {
+        this.camera.position.lerp(want, Math.min(1, dt * 3.2));
+      }
+      // Look AHEAD of her, not at her. Where a boat is going is the only thing
+      // you actually need to see, and at three knots it is eight metres away.
+      const lead = 9 + sp * 0.6;
+      this.camera.lookAt(
+        v.pos.x + Math.sin(r) * lead,
+        v.pos.y + 0.8,
+        v.pos.z - Math.cos(r) * lead
+      );
+    }
+
+    /*
+     * Going in the water is a delay, not an ending.
+     *
+     * The old car called crash() and printed "press Esc to go back", which for
+     * a delivery game means a child who clips a beach at speed is sent to a
+     * menu. Now a truck pulls you out where you last were, and the only thing
+     * you have actually lost is the time — which is what the clock is for.
+     */
+    if (v.swamped && !this._swampSaid) {
+      this._swampSaid = true;
+      this.hud.notify('In the water. Hold on — a truck is pulling you out.', 'warn', 3);
+    }
+    if (!v.swamped) this._swampSaid = false;
+
+    // Bumping a building is a bump. Only the boat can still properly crash.
+    if (v.lastBump) {
+      this.hud.notify(`You clipped ${v.lastBump}.`, 'warn', 2.5);
+      v.lastBump = null;
+    }
+    if (v.crashed && !this._droveInto) {
+      this._droveInto = true;
+      this.hud.notify(v.crashReason + ' — press Esc to go back', 'warn', 8);
+    }
+    if (!v.crashed) this._droveInto = false;
+
+    const r = v.readouts();
+    if (v.isBoat && this.boatHud) {
+      /*
+       * The sounder needs somewhere to sound.
+       *
+       * BoatHud.update takes a context with `pos` or `depth` on it and falls
+       * back to 99 when it has neither — and it was being handed neither, so
+       * the depth under the keel, which is the single instrument the whole
+       * boat game is steered by, read ninety-nine metres everywhere including
+       * alongside the quay. The echo-sounder ping is gated on the same number,
+       * so that never sounded either.
+       */
+      /*
+       * And it has to sound the water under the keel as the keel moves.
+       * `v.depth` is the chart depth at her position, which inside Sennen's
+       * basin is 5.0 m from the quay to the mouth — measured, the gauge read
+       * "5.0" and never changed while she moved, which reads as a dead
+       * instrument. `v.sounding` is the same water with the swell's lift on
+       * the hull in it, which is what a real sounder shows.
+       */
+      this.boatHud.update(dt, r, {
+        sim: this,
+        audio: this.audio,
+        pos: v.pos,
+        depth: v.sounding ?? v.depth,
+        aground: v.aground,
+        weather: this.weather,
+        boat: v,
+        target: this.activeTarget,
+      });
+    } else if (this.driveHud) {
+      /*
+       * The drive HUD takes a STATE, not the readouts.
+       *
+       * It reads `s.readouts`, `s.surface`, `s.job`, `s.clock`, `s.cargo` and
+       * `s.turn` off one object. Handing it the readouts directly meant
+       * `s.readouts` was the readouts function itself, `r.speedKph` was
+       * undefined, and every number on the courier's panel sat at whatever it
+       * was built with — a frozen speed, a frozen surface word, no clock and
+       * no load. The job ran; the instruments did not.
+       */
+      /*
+       * Now one state object, refilled every frame, with the clock the job
+       * is judged by and the distance to the drop-off; and the model set
+       * down on its tyres first (IslandRoads.van.panel in jobs.js).
+       */
+      IslandRoads.van.panel(this, dt, v, r);
+    } else {
+      this.hud.setVehicle(r, v.spec);
+    }
+  }
+
+  /**
+   * The boat talking back: bangs, slams, and saying the word "aground".
+   *
+   * Kept out of updateDrive because it is all one-shot reaction to events the
+   * physics raised. The important line is the one about carrying her way. A
+   * ten-year-old who puts the lever to STOP and watches the boat keep going
+   * concludes the game has stopped listening. Telling them, once, in words,
+   * that it is the boat and not the controls is the difference between a
+   * mechanic they learn and a bug they report.
+   */
+  boatFeedback(v) {
+    const events = v.takeEvents();
+    if (events) {
+      for (const e of events) {
+        if (e.kind === 'bang' || e.kind === 'wreck') {
+          if (this.audio.available) this.audio.alerts.terrain();
+          this.hud.notify(v.agroundMessage || "You're on the putty — astern, gently", 'warn', 6);
+        } else if (e.kind === 'afloat') {
+          this.hud.notify('Afloat again. Mind where she draws.', 'info', 3);
+        } else if (e.kind === 'slam' && !this._slamSaid) {
+          this._slamSaid = true;
+          this.hud.notify('She is slamming — ease her back to Half.', 'info', 4);
+        }
+      }
+    }
+    // Said once per outing, the first time she is genuinely running on.
+    if (!this._waySaid && v.speed > 3 && v.demand <= 0 && !v.aground) {
+      this._waySaid = true;
+      this.hud.notify('Engine stopped and she is still going — that is her carrying her way.', 'info', 5);
+    }
+  }
+
+  /**
+   * Which game the keys are in right now — the plug-ins first (walking,
+   * hanging under a parachute, a rocket), then the vehicle. The hints and
+   * the H card use it to name the right game's keys; Settings opens that
+   * game's group first.
+   */
+  keyContext() {
+    const ext = this.state === 'flying' || this.state === 'paused' ? extKeyContext(this) : null;
+    if (ext) return ext;
+    if (this.state === 'menu') {
+      const g = this.game;
+      return g === 'heli' ? 'heli' : g === 'boat' ? 'boat' : g === 'car' ? 'car' : 'plane';
+    }
+    if (this.mode === 'drive') return (this.vehicle && this.vehicle.isBoat) || this.game === 'boat' ? 'boat' : 'car';
+    return SPEC.rotor ? 'heli' : 'plane';
+  }
+
+  /** The Settings group for the game being played (or chosen, in the menus). */
+  keyGroup() {
+    return CONTEXT_GROUP[this.keyContext()] || 'Flying';
+  }
+
+  update(dt) {
+    this.input.context = this.keyContext();
+    if (this.mode === 'drive' && this.vehicle) {
+      /*
+       * Driving used to return from here before the key handling and before
+       * input.endFrame(), which had two consequences: Esc did nothing, so
+       * there was no way to pause or quit out of the boat at all; and every
+       * key pressed while driving stayed in the pressed-this-frame set and
+       * fired, all at once, on the next flight.
+       */
+      const input = this.input;
+      if (input.pressed('pause')) {
+        if (this.state === 'flying') this.pause();
+        else if (this.state === 'paused') this.resume();
+      }
+      if (this.state === 'flying') {
+        if (input.pressed('camera')) {
+          // The rig is the aeroplane's camera and does nothing while driving,
+          // so C was a key that printed a label and changed no pixels. The van
+          // has its own three views, and the bonnet one is the reason the
+          // bonnet view exists: it is how you place the van at a loading bay.
+          if (this.driveCam && this.vehicle.spec.kind === 'car') {
+            this.hud.notify(`View: ${DRIVE_VIEW_LABELS[this.driveCam.cycle()]}`, 'info', 1.8);
+          } else {
+            this.hud.notify(`View: ${VIEW_LABELS[this.rig.cycle()]}`, 'info', 1.8);
+          }
+        }
+        if (input.pressed('minimap')) this.hudAction('minimap');
+        if (input.pressed('help')) this.hud.toggleControls(this.input.bindings, keyLabel, this.helpActions());
+        if (input.pressed('hudMode')) this.hudAction('hudMode');
+        // Paused means paused. The boat used to carry on out to sea while the
+        // menu was up, so you came back to it somewhere else entirely.
+        this.updateDrive(dt);
+        /*
+         * And the chart. This branch returns long before the flight code that
+         * ticks it, so the minimap froze the moment you got in the boat — it
+         * showed the aeroplane's last position on the apron, for the whole
+         * trip, which for a game about reading the water is the one instrument
+         * that had to work.
+         */
+        if (this.minimap) this.minimap.update(dt, this);
+        // The runner, which this branch used to return before ever reaching —
+        // which is why there has never been such a thing as a boat mission or
+        // a car job, however many were written.
+        this.runner.update(dt);
+        // And what it is aiming at. Only the boat set this (ten times a
+        // second, in updateDrive), so in the van it kept whatever the last
+        // flight left — null after Free Flight, a mission's last target
+        // after a mission. Measured on First Run with a flight's target left
+        // behind: sim.activeTarget kept it for the whole job while the runner
+        // said "the town". The call costs 0.15 microseconds.
+        this.activeTarget = this.runner.activeTarget();
+        this.audio.updateVehicle(dt, this.vehicle.readouts(), this.weather);
+        // Match the real signatures — sky.update takes the weather alone, and
+        // ocean.update takes (dt, weather). Guessing them cost a thrown frame.
+        this.weather.update(dt);
+        if (this.ocean) this.ocean.update(dt, this.weather);
+        if (this.sky) this.sky.update(this.weather);
+        updateSurfaces(this.weather, dt);
+      }
+      if (this.state === 'flying') extUpdate(this, dt);
+      input.endFrame();
+      return;
+    }
+    const ac = this.aircraft;
+
+    if (this.state === 'flying') {
+      if (this.taxi.active) this.taxi.update(dt);
+      const ctrl = this.input.update(dt, { simple: ac.mode === 'simplified', map: SPEC.rotor ? HELI_MAP : null });
+      let pitch = ctrl.pitch;
+      let roll = ctrl.roll;
+      let yaw = ctrl.yaw;
+      let throttle = ctrl.throttle;
+
+      // Autopilot, if it is on and you have not grabbed the controls back.
+      // Note the locals: `ctrl` belongs to the input module and is reused every
+      // frame, so writing the autopilot's output into it would come straight
+      // back next frame looking exactly like the player moving the stick.
+      if (this.autopilot.engaged && this.autopilot.handedBack) {
+        const why = this.autopilot.handedBack;
+        this.autopilot.handedBack = null;
+        this.toggleAutopilot(false);
+        this.hud.notify(why, 'good', 4);
+      }
+      if (this.autopilot.engaged) {
+        if (this.autopilot.playerTookOver(ctrl) || ac.onGround || ac.crashed) {
+          this.toggleAutopilot(false);
+        } else {
+          const t = this.activeTarget ? this.activeTarget.pos : null;
+          const ap = this.autopilot.update(dt, ac, t);
+          pitch = ap.pitch;
+          roll = ap.roll;
+          yaw = ap.yaw;
+          throttle = ap.throttle;
+          this.input.throttleTarget = ap.throttle;
+          this.hud.setAutopilot(true, this.autopilot.status(t), this.autopilot);
+          // On an approach it configures the aeroplane, because that is how
+          // you actually come down: a clean airframe at idle will not descend
+          // steeply however hard you push, and no amount of elevator is a
+          // substitute for putting the wheels and the flaps out.
+          if (this.autopilot.mode === 'approach' && !SPEC.rotor) {
+            const out = -550 - ac.pos.x;
+            if (out < 7000 && !ac.gearDown) ac.toggleGear();
+            const wantFlap = out < 3500 ? 2 : out < 6000 ? 1 : 0;
+            if (ac.flapStep() < wantFlap) ac.setFlaps(wantFlap);
+          }
+        }
+      }
+
+      ac.controls.pitch = pitch;
+      ac.controls.roll = roll;
+      ac.controls.yaw = yaw;
+      ac.controls.throttle = throttle;
+      ac.controls.brakes = ctrl.brakes;
+      // Toe brakes, each side its own wheel (null: one brake for both, as always).
+      ac.controls.brakeL = ctrl.brakeL ?? null;
+      ac.controls.brakeR = ctrl.brakeR ?? null;
+      // Split thrust levers: engine 2 minus engine 1 (the physics turns it into yaw on a twin).
+      ac.controls.thrustSplit = this.autopilot.engaged ? 0 : ctrl.thrustSplit || 0;
+      // A hand on the lever (the helicopter's height hold must not mistake
+      // its own follow-up for the pilot), and whether the autopilot is the
+      // pilot (the helicopter's assist stands down while it is).
+      ac.controls.leverHeld = !!ctrl.leverHeld;
+      ac.autopilotOn = this.autopilot.engaged;
+      // Trim is the pilot's, and the autopilot must not inherit it — it flies
+      // the elevator directly and would be fighting a bias it did not set.
+      ac.controls.trim = this.autopilot.engaged ? 0 : ctrl.trim || 0;
+      // Test / debug hook: lets the self-test fly the aeroplane as if it were
+      // holding the controls. Ignored entirely during normal play.
+      if (this.override) {
+        for (const k in this.override) {
+          if (this.override[k] !== null && this.override[k] !== undefined) ac.controls[k] = this.override[k];
+        }
+        // An overridden lever is a held lever.
+        if (this.override.throttle !== null && this.override.throttle !== undefined) ac.controls.leverHeld = true;
+      }
+    } else {
+      this.input.update(dt, { simple: true });
+    }
+    this.handleDiscreteInput();
+    if (this.state === 'flying') this.applyControllers();
+
+    this.weather.update(dt);
+
+    if (this.state === 'flying') {
+      // Fixed-step physics for consistent behaviour on any refresh rate.
+      const STEP = 1 / 120;
+      this.acc += Math.min(dt, 0.1);
+      let steps = 0;
+      while (this.acc >= STEP && steps < 12) {
+        ac.update(STEP, this.weather);
+        /*
+         * Hover assist trim follow-up. The flight model asks, the input layer
+         * answers; neither reaches into the other. Inside the fixed-step loop
+         * so the trim rate is the same on a 60 Hz Chromebook and a 120 Hz
+         * iPad. Not while the autopilot is flying — it sets throttleTarget
+         * itself and the two would fight.
+         */
+        if (ac.rotor && ac.rotor.trimRequest && !this.autopilot.engaged) {
+          this.input.nudgeThrottle(ac.rotor.trimRequest * STEP);
+        }
+        this.acc -= STEP;
+        steps++;
+      }
+      this.updateBrace(dt);
+      // The engine key's "press again" window (pressStarter), in game time.
+      if (this._starterArm > 0) this._starterArm -= dt;
+      this.runner.update(dt);
+      this.atc.update(dt);
+      this.activeTarget = this.runner.activeTarget();
+      if (this.crate) {
+        this.crate.update(dt, heightAt, this.weather.windVector());
+        /*
+         * The bang belongs to whoever owns the audio, not to the bomb — the
+         * marker has no idea a mixer exists. `playThunder` close-to is a deep
+         * crack with a rolling tail, which is what a bomb sounds like from a
+         * couple of kilometres up.
+         */
+        if (this.crate.justExploded) {
+          this.crate.justExploded = false;
+          this.audio.available && this.audio.ambience.playThunder(0.1);
+        }
+        /*
+         * Reload once it is down. Waiting for it to land rather than arming
+         * straight away is deliberate: you watch your last one all the way in,
+         * which is the part you learn from, and you cannot have two in the air
+         * at once confusing which is which.
+         */
+        if (this.crate.landed) {
+          this.crateClear = (this.crateClear || 0) + dt;
+          if (this.crateClear > 3 && this._storesLeft > 0 && !this._armed) {
+            this.crateClear = 0;
+            this.removeCrate();
+            this.hasCargo = true;
+            this.hud.notify(`Reloaded — ${this._storesLeft} left`, 'info', 2.6);
+          }
+        } else {
+          this.crateClear = 0;
+        }
+      }
+    }
+
+    // World. It centres on the aeroplane you are in: your own, or — riding as
+    // a passenger, the President's seat — the one flying you (`this.riding`,
+    // set by src/game/roles/afo-president.js), many kilometres from the
+    // parked aeroplane under the seat.
+    const focus = (this.riding && this.riding.pos) || ac.pos;
+    this.sky.update(this.weather);
+    this.sky.followTarget(focus);
+    /*
+     * In the cockpit the sun's shadow map is pulled in round the pilot's
+     * eye (sky.js setShadowReach), so the canopy bow, the window frames and
+     * the glareshield throw sharp shadows across the panel. Centred on the
+     * eye, not the aeroplane: the 747's flight deck is 27 m ahead of its
+     * centre of gravity, outside a 16 m reach.
+     */
+    if (this.sky.setShadowReach) {
+      const seated = this.rig && this.rig.mode === 'cockpit' && this.cockpit && this.cockpit.visible && !this.riding;
+      if (seated && this.rig.eye) {
+        this._shadowEye = (this._shadowEye || new THREE.Vector3()).copy(this.rig.eye).applyQuaternion(ac.quat).add(ac.pos);
+        this.sky.setShadowReach(16);
+        this.sky.followTarget(this._shadowEye);
+      } else this.sky.setShadowReach(150);
+    }
+    this.ocean.follow(focus);
+    this.ocean.update(dt, this.weather);
+    // Wet tarmac after rain, glass glinting at a low sun (render/surfaces.js).
+    updateSurfaces(this.weather, dt);
+    this.airport.update(dt, this.weather);
+    this.apron.update(dt, this.weather);
+    this.updateArmedFailures(dt);
+    /*
+     * Outside the branch below, deliberately.
+     *
+     * Inside it, the minimap's fault light only ever turned ON — the branch
+     * stops running the moment the counter reaches zero, so it never got told
+     * the instruments had come back and flashed for the rest of the flight.
+     */
+    if (this.minimap) this.minimap.setFaulty(this.instrumentBlackout > 0);
+    if (this.instrumentBlackout > 0) {
+      this.instrumentBlackout = Math.max(0, this.instrumentBlackout - dt);
+      // Called on the way down to zero as well, so the panel comes back.
+      this.hud.setBlackout(this.instrumentBlackout > 0);
+      // A dead panel beeps. Once a second, not continuously — a solid tone is
+      // just noise, and the gap is what makes it read as an alarm.
+      // The autopilot flies on the instruments. With the panel dead it has
+      // nothing to fly on, so it drops out — which is the point of a lightning
+      // strike: it hands you an aeroplane in cloud with no help.
+      /*
+       * ...except during a mayday, where the whole point is that the
+       * aeroplane keeps flying itself on the emergency system. This dropped
+       * it out every frame with "Autopilot dropped out — no instruments",
+       * which is exactly right after a lightning strike and exactly wrong
+       * here, and it is why the aeroplane never circled.
+       */
+      if (this.autopilot.engaged && !this.bracing) {
+        this.toggleAutopilot(false);
+        this.hud.notify('Autopilot dropped out — no instruments', 'warn', 4);
+      }
+      this._blackoutBeep = (this._blackoutBeep || 0) - dt;
+      if (this.instrumentBlackout > 0 && this._blackoutBeep <= 0) {
+        this._blackoutBeep = 1;
+        if (this.audio.available) {
+          this.audio.mixer.tone({ bus: 'alerts', freq: 720, duration: 0.16, gain: 0.3, type: 'square' });
+          this.audio.mixer.tone({ bus: 'alerts', freq: 540, duration: 0.16, gain: 0.22, type: 'square', detune: 8 });
+        }
+      }
+      if (this.instrumentBlackout === 0) this.hud.notify('Instruments back', 'good', 2.5);
+    }
+    this.updateRandomDisasters(dt);
+    this.updateVolcano(dt);
+    this.wreck.update(dt);
+    this.tornado.update(dt);
+
+    // A lightning storm keeps striking for as long as it lasts.
+    if (this.lightningStorm) {
+      const st = this.lightningStorm;
+      st.left -= dt;
+      st.next -= dt;
+      if (st.next <= 0 && st.left > 0) {
+        st.next = 20 + Math.random() * 20;
+        this.weather.lightningFlash = 1;
+        this.instrumentBlackout = Math.max(this.instrumentBlackout, 7 + Math.random() * 7);
+        this.hud.notify('Struck — instruments out', 'warn', 3);
+        if (this.audio.available) this.audio.ambience.playThunder && this.audio.ambience.playThunder();
+      }
+      if (st.left <= 0) {
+        this.lightningStorm = null;
+        this.hud.notify('The storm has passed', 'good', 3);
+      }
+    }
+    // Run the clocks on anything currently happening to you.
+    if (this.activeEvents) {
+      for (const id of Object.keys(this.activeEvents)) {
+        this.activeEvents[id] -= dt;
+        if (this.activeEvents[id] <= 0) delete this.activeEvents[id];
+      }
+    }
+    // Keep a marker on it the whole time it is on the ground.
+    if (this.tornado.active) {
+      const t = this.tornado;
+      const dx = t.pos.x - this.aircraft.pos.x;
+      const dz = t.pos.z - this.aircraft.pos.z;
+      const km = Math.hypot(dx, dz) / 1000;
+      let brg = (Math.atan2(dx, -dz) * 180) / Math.PI;
+      if (brg < 0) brg += 360;
+      // Relative to where the nose is pointing, which is what you can act on.
+      const rel = ((brg - this.aircraft.readouts().heading + 540) % 360) - 180;
+      const clock = Math.round(((rel + 360) % 360) / 30) || 12;
+      this.hud.setHazard(
+        `<b>${t.label || 'TORNADO'} TORNADO</b> ${km.toFixed(1)} km · ` +
+          `bearing ${String(Math.round(brg)).padStart(3, '0')} · ${clock} o'clock`
+      );
+      const near = this.tornado.proximity(this.aircraft.pos);
+      this._tornadoWarn = (this._tornadoWarn || 0) - dt;
+      if (near > 0.62 && this._tornadoWarn <= 0) {
+        this._tornadoWarn = 6;
+        this.hud.notify('You are too close to the tornado — turn away', 'warn', 4);
+        this.rig.kick(near * 0.8);
+      }
+
+      /*
+       * Inside the core it does damage, and the damage scales with the rating.
+       *
+       * The tornado used to be pure wind: unpleasant, but you could fly
+       * straight through the middle of one and come out of the far side with
+       * an intact aeroplane, which made the strongest weather in the game the
+       * least frightening thing in it. Now the core tears at the airframe.
+       */
+      const bite = this.tornado.bite(this.aircraft.pos);
+      /*
+       * The storm penetrator's spar does not fail. Everything else is the same.
+       *
+       * `stormProof` buys exactly one thing: the airframe survives tornado
+       * loads. The wind field is untouched, so it is still picked up, rolled
+       * and thrown — and being big, slab-sided and slow to roll, it is thrown
+       * harder than the trainer would be. If the ride went calm as well, the
+       * aeroplane would just be a switch that turns the tornado off, which is
+       * a much less interesting thing to own.
+       */
+      const stormProof = !!(this.aircraftType && this.aircraftType.stormProof);
+      if (bite > 0.15 && !this.aircraft.crashed) {
+        const ef = t.ef || 0;
+        // Buffeting you can feel long before anything breaks.
+        // (Not `aircraft.buffet` — the flight model recomputes that from alpha
+        // every step, so writing to it here would be overwritten immediately.)
+        this.rig.kick(bite * (0.6 + ef * 0.22) * (stormProof ? 1.7 : 1));
+        if (stormProof) {
+          // Say so occasionally, or holding together reads as the game having
+          // forgotten to hurt you.
+          this._proofWarn = (this._proofWarn || 0) - dt;
+          if (bite > 0.4 && this._proofWarn <= 0) {
+            this._proofWarn = 7;
+            this.hud.notify('The spar is holding — but it is flying you now', 'warn', 4);
+          }
+        } else {
+          this._tornadoDamage = (this._tornadoDamage || 0) + dt * bite * (0.35 + ef * 0.25);
+        }
+        // Things start letting go, worst first.
+        const f = stormProof ? null : this.aircraft.failures;
+        if (this._tornadoDamage > 1.1 && f && !f.roughEngine) {
+          f.roughEngine = true;
+          this.hud.notify('Debris through the engine — it is running rough', 'warn', 5);
+        }
+        if (this._tornadoDamage > 2.2 && f && !f.elevator) {
+          f.elevator = true;
+          this.hud.notify('The elevator has been torn — pitch is failing', 'warn', 5);
+        }
+        // Deep in the core of a strong one, the aeroplane simply comes apart —
+        // unless it was built for precisely this.
+        if (!stormProof && this._tornadoDamage > 3.4 && bite > 0.55 && ef >= 2) {
+          this.aircraft.crash('The tornado tore the aeroplane apart');
+        }
+      } else if (this._tornadoDamage) {
+        // Out of it — stop accumulating, but the failures stay broken.
+        this._tornadoDamage = Math.max(0, this._tornadoDamage - dt * 0.2);
+      }
+    } else if (this._hadTornado) {
+      this.hud.setHazard(null);
+    }
+    this._hadTornado = this.tornado.active;
+    if (this.touch) this.touch.update(this.aircraft.readouts(), this);
+    this.scenery.update(dt, this.weather);
+    this.scenery.lod(this.camera.position);
+    if (this.seamarks) this.seamarks.update(dt, this.weather);
+    this.features.update(dt, this.weather);
+    this.clouds.update(dt, this.weather, focus);
+    this.rain.update(dt, this.weather, this.camera.position, ac.vel);
+    this.cloudImmersion = this.clouds.cloudImmersion(focus.y, this.weather);
+    this.papiHint = this.airport.updatePapi(ac.pos);
+
+    // Aeroplane + cockpit.
+    // A crashing fleet model drives its own transform — see model-adapter.js.
+    syncAircraftModel(this.model, ac);
+    this.model.userData.update(dt, ac, this.weather);
+    // The model's own update is what drives a sinking wreck, so the floor has
+    // to be applied after it — clamping before it is undone in the same frame.
+    clampSinking(this.model, ac);
+    const inCockpit = this.rig.mode === 'cockpit';
+    // Two cockpit views. The default is the clean one — no panel in the way,
+    // wide field of view, instruments on the overlay. "Realistic cockpit" in
+    // the pause menu puts the actual instrument panel in front of you, and
+    // then the overlay copies of those instruments get out of the way,
+    // because you are reading them off the panel instead.
+    const wantPanel = inCockpit && !!this.settings.realisticCockpit;
+    // Only strip the overlay back when you are actually looking at the panel.
+    const wantMinimal = wantPanel;
+    if (wantMinimal !== this._minimalHud) {
+      this._minimalHud = wantMinimal;
+      this.hud.setMinimal(wantMinimal);
+    }
+    // The cockpit is drawn in *both* cockpit views. Hiding it entirely in the
+    // default one was a mistake: switching to the cockpit view and finding no
+    // cockpit there reads as broken, not as clean. What "realistic" changes is
+    // the field of view and whether the overlay repeats the instruments — not
+    // whether the aeroplane has an interior.
+    this.cockpit.visible = inCockpit;
+    if (inCockpit) this.cockpit.userData.update(dt, ac, this.weather, this);
+    // What of the outside cannot be seen from the seat is not drawn while
+    // you are in it (aircraft/cockpit/kit.js insideOnly) — in it, not just in
+    // the cockpit mode: a feature's own camera (an ejection, a replay) may be
+    // looking at the aeroplane from outside meanwhile.
+    if (this.cockpit.userData.viewing) {
+      let seated = inCockpit && !!this.rig.eye;
+      if (seated) {
+        this._seatEye = (this._seatEye || new THREE.Vector3()).copy(this.rig.eye).applyQuaternion(ac.quat).add(ac.pos);
+        seated = this.camera.position.distanceToSquared(this._seatEye) < 4;
+      }
+      this.cockpit.userData.viewing(seated);
+    }
+    // A finger dragged across the picture looks round the cockpit (input.js).
+    this.input.touchLook = inCockpit;
+    this.audio.setInterior(inCockpit);
+
+    if (!extCamera(this, dt)) {
+      this.rig.update(dt, ac, this.input, this.weather);
+      // Did anything stretch the airliner's follow view? See checkStretch().
+      this.rig.checkStretch();
+    }
+
+    // Extra fog inside cloud gives a genuine whiteout.
+    if (this.cloudImmersion > 0.01) {
+      const p = this.weather.palette();
+      this.scene.fog.density = p.fogDensity + this.cloudImmersion * 0.0045;
+      this.scene.fog.color.copy(p.fogColor).lerp(new THREE.Color(0xdfe6ee), this.cloudImmersion * 0.7);
+    }
+
+    // Navigation guidance: the mission's current target, or the runway when
+    // there is nothing else to aim at.
+    if (this.navGuide) {
+      let guideTarget = this.taxi.active ? this.taxi.target() : null;
+      if (!guideTarget) guideTarget = this.activeTarget ? this.activeTarget.pos : null;
+      // On the ground with nothing to aim at, point down the runway rather than
+      // showing nothing. The rails vanishing the moment you land makes the
+      // whole feature look broken, and lined up for take-off is exactly when a
+      // beginner wants to know which way "straight ahead" is.
+      if (!guideTarget && this.state === 'flying') {
+        guideTarget = ac.onGround ? RUNWAY.thresholdEast : RUNWAY.touchdown;
+      }
+      /*
+       * Arrow, beacon, or both — the player's choice.
+       *
+       * The rails and the arrow both say "turn this way"; the beacon says
+       * "the place is *there*". Which one helps depends entirely on the person,
+       * which is why this is a setting and not a decision I get to make.
+       */
+      const style = this.settings.guideStyle || 'arrow';
+      // Not for a passenger (this.riding): the rails would run from the parked
+      // aeroplane under the President's seat, drawn over the cabin's walls.
+      const wantRails = this.state === 'flying' && style !== 'beacon' && !this.riding;
+      // From the seat the panel and the window frames hide the rails.
+      if (this.navGuide.setOccluded) this.navGuide.setOccluded(this.rig && this.rig.mode === 'cockpit' && this.cockpit && this.cockpit.visible);
+      this.navGuide.update(
+        dt,
+        wantRails ? guideTarget : null,
+        ac.pos,
+        ac.quat,
+        this.camera.position
+      );
+      if (this.minimap) this.minimap.update(dt, this);
+      if (this.beacon) {
+        const wantBeacon = this.state === 'flying' && style !== 'arrow' && this.navGuide.enabled && !this.riding;
+        this.beacon.setTarget(wantBeacon ? guideTarget : null);
+        this.beacon.update(dt);
+      }
+      /*
+       * The destination's own soft beacon: where the mission ends, so you can
+       * see the place from the moment you set off. Only while a mission or
+       * job is running (a free flight has no destination), and not on top of
+       * the main beacon when that already stands on the same spot.
+       */
+      if (this.destBeacon) {
+        const running = this.state === 'flying' && !this.riding && this.runner.status === 'running';
+        const dest = running && this.runner.destination ? this.runner.destination() : null;
+        const covered = dest && this.beacon && this.beacon.group.visible && guideTarget
+          && Math.hypot(dest.pos.x - guideTarget.x, dest.pos.z - guideTarget.z) < 60;
+        this.destBeacon.setTarget(dest && !covered ? dest.pos : null);
+        this.destBeacon.update(dt);
+      }
+    }
+
+    this.audio.update(dt, ac, this.weather, this.cloudImmersion);
+    if (this.state === 'flying') {
+      this.hud.setCoach(this.coachHint(ac));
+      // The mission clock, if this one has a limit.
+      const def = this.runner.status === 'running' ? this.runner.def : null;
+      this.hud.setMissionClock(
+        def && def.timeLimit ? def.timeLimit - this.runner.elapsed : null
+      );
+      // For the state pills (ui/pills.js): is the tug pushing us back?
+      this.pushingBack = __airportServices.S.state === 'pushback';
+      this.hud.update(dt, this);
+      extUpdate(this, dt);
+    }
+    this.input.endFrame();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Headless driver — used by the automated checks and handy for debugging.
+     Advances the simulation by a fixed amount without waiting for frames.   */
+  /* ------------------------------------------------------------------ */
+
+  step(seconds = 1, dt = 1 / 60) {
+    const n = Math.max(1, Math.round(seconds / dt));
+    for (let i = 0; i < n; i++) this.update(dt);
+    this.renderFrame();
+    return this.snapshot();
+  }
+
+  /**
+   * Draw one frame of the world the way this tier draws it: High and Ultra
+   * through the bloom and grade (render/post.js), Low and Medium with the
+   * single renderer.render() they always had. The frame loop, step() and the
+   * Auto quality probe all come through here; the hangar's podium does not.
+   */
+  renderFrame() {
+    const post = this.post;
+    if (post && post.enabled) {
+      if (this.weather) post.setLook(this.weather.look());
+      post.render(this.scene, this.camera);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  /** Compact state dump for tests. */
+  snapshot() {
+    const r = this.aircraft.readouts();
+    const step = this.runner.step;
+    return {
+      state: this.state,
+      mode: this.mode,
+      view: this.rig.mode,
+      pos: [Math.round(this.aircraft.pos.x), Math.round(this.aircraft.pos.y), Math.round(this.aircraft.pos.z)],
+      ias: Math.round(r.iasKts),
+      altFt: Math.round(r.altFt),
+      aglFt: Math.round(r.aglFt),
+      vsFpm: Math.round(r.vsFpm),
+      heading: Math.round(r.heading),
+      throttle: Math.round(r.throttle * 100),
+      fuelPct: Math.round(r.fuelPct * 100),
+      onGround: r.onGround,
+      gearDown: r.gearDown,
+      flaps: r.flapStep,
+      stalled: r.stalled,
+      engineOn: r.engineOn,
+      crashed: this.aircraft.crashed,
+      crashReason: this.aircraft.crashReason,
+      lastTouchdown: this.aircraft.lastTouchdown,
+      missionStatus: this.runner.status,
+      stepId: step ? step.id : null,
+      objective: this.hud.objectiveText.textContent,
+      papi: this.papiHint ? this.papiHint.state : null,
+      weather: this.weather.serialize(),
+      target: this.activeTarget ? this.activeTarget.label : null,
+      fps: this.fps,
+    };
+  }
+
+  /** Press / release a bound action the way a real keyboard would. */
+  key(code, down = true) {
+    window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code, bubbles: true }));
+  }
+
+  tap(code) {
+    this.key(code, true);
+    this.key(code, false);
+  }
+
+  /**
+   * The single most useful thing to press right now, named explicitly. New
+   * pilots do not need a manual, they need to know that Shift is power and that
+   * S is back-pressure — at the moment it matters.
+   */
+  coachHint(ac) {
+    const r = ac.readouts();
+    const kts = r.iasKts;
+
+    if (ac.crashed) return 'Press <kbd>Esc</kbd> and choose <b>Restart</b> to try again';
+    if (!ac.engineOn && ac.rpm < 0.05) return 'Press <kbd>I</kbd> to start the engine';
+
+    if (ac.onGround) {
+      // Rolling fast with the power already off: they want the brakes.
+      if (r.throttle < 0.2 && ac.groundSpeed > 6) return 'Hold <kbd>Space</kbd> to brake';
+      if (r.throttle < 0.85) return 'Hold <kbd>Shift</kbd> for full power';
+      if (kts > 52) return 'Now pull back gently on <kbd>S</kbd> to fly!';
+      if (kts > 12) return 'Keep straight with <kbd>Q</kbd> / <kbd>E</kbd> — lift off at 55 knots';
+      return 'Hold <kbd>Shift</kbd> — you need 55 knots to fly';
+    }
+
+    // Airborne.
+    // "Far too fast" was 150 kt for everything: the Skylark's number (0.94 of
+    // its 159 kt never-exceed) and nobody else's. Measured in level flight,
+    // the F-22 at 305 kt, Massimo at 317 kt and the 747 at 232 kt were all
+    // told to pull the power right off, each a long way under its own
+    // never-exceed (603, 700 and 369 kt). Now it is 80% of the type's own
+    // never-exceed, never under 150, so the Skylark (80% = 128) keeps its 150.
+    if (kts > Math.max(150, 0.8 * SPEC.vne * KTS)) return 'Far too fast — ease the power right off with <kbd>Ctrl</kbd> and level the wings';
+    if (kts < 52) return 'Too slow! Add power with <kbd>Shift</kbd> and lower the nose with <kbd>W</kbd>';
+    if (ac.stalled) return 'Push the nose down with <kbd>W</kbd> and add power';
+    if (ac.airborneTime < 8) return 'Climbing — keep the nose just above the horizon';
+
+    // On final approach to runway 09.
+    const onFinal =
+      ac.pos.x < RUNWAY.thresholdWest.x &&
+      ac.pos.x > RUNWAY.thresholdWest.x - 5000 &&
+      r.aglFt < 900 &&
+      Math.abs(((r.heading - 90 + 540) % 360) - 180) < 45;
+    if (onFinal) {
+      if (!r.gearDown) return 'Landing gear! Press <kbd>G</kbd> before you land';
+      if (this.papiHint && this.papiHint.state === 'low') return 'Too low — add power with <kbd>Shift</kbd>';
+      if (this.papiHint && this.papiHint.state === 'high') return 'Too high — ease the power off with <kbd>Ctrl</kbd>';
+      if (kts > 95) return 'Too fast to land — ease the power off with <kbd>Ctrl</kbd> (aim for 70 knots)';
+      if (r.flapStep === 0 && kts < 100) return 'Press <kbd>F</kbd> for flaps — they help you fly slowly';
+      if (r.aglFt < 60) return 'Ease back on <kbd>S</kbd> just before the wheels touch';
+      return 'Follow the PAPI lights — two white, two red';
+    }
+    return null;
+  }
+
+  loop() {
+    const tick = () => {
+      requestAnimationFrame(tick);
+      // A world being built in stages (buildWorldStaged) is half there: draw nothing until it is whole.
+      if (this._worldBuilding) {
+        this.clock.getDelta();
+        return;
+      }
+      let dt = this.clock.getDelta();
+      if (dt > 0.25) dt = 0.25; // after a tab switch, do not jump
+      try {
+        this.update(dt);
+        // The hangar's podium is drawn INSTEAD of the island while it is open
+        // (ui/hangar-showcase.js): it covers the window, so the world behind
+        // it would be a whole frame drawn for nobody.
+        if (!this.menus.drawView || !this.menus.drawView(this.renderer, dt)) this.renderFrame();
+      } catch (err) {
+        console.error(err);
+        if (!this._errored) {
+          this._errored = true;
+          fatal('The simulator hit an unexpected error while running.', err && err.stack);
+        }
+        return;
+      }
+      this.fpsFrames++;
+      this.fpsTime += dt;
+      if (this.fpsTime >= 1) {
+        this.fps = Math.round(this.fpsFrames / this.fpsTime);
+        this.fpsFrames = 0;
+        this.fpsTime = 0;
+        this.menus.updateFps(this.fps);
+        // Dynamic resolution, in flight only: the menus draw the world
+        // behind a blurred sheet, and that is not the frame being held.
+        if (this.dynRes && this.state === 'flying' && !document.hidden) {
+          const r = this.dynRes.tick(this.fps);
+          if (r.changed) {
+            this.renderer.setPixelRatio(pixelRatioCap(this.qualityBuilt || this.settings.quality, window.devicePixelRatio) * r.scale);
+            console.debug(`[quality] ${this.fps} fps: resolution scale ${r.scale}`);
+          }
+        }
+      }
+    };
+    tick();
+  }
+}
+
+const game = new Game();
+game.boot().catch((err) => {
+  console.error(err);
+  fatal('The simulator could not start.', err && err.stack);
+});
+
+export default game;
+
+/** The field name, without reaching through the ATC director twice. */
+function field2(game) {
+  return game.atc ? game.atc.field : 'Kestrel';
+}

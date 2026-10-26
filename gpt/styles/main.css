@@ -1,0 +1,3331 @@
+/* =========================================================================
+   Island Flight Simulator — interface styles.
+   System fonts only, so nothing is downloaded and text renders instantly.
+   ========================================================================= */
+
+/*
+ * `hidden` means hidden. Once, globally, before anything else.
+ *
+ * The browser's own [hidden] rule is a user-agent rule, so ANY author rule
+ * that sets `display` beats it. Every card and panel in this file sets one, so
+ * every `el.hidden = true` in the JavaScript was quietly doing nothing — and
+ * this was found and patched one selector at a time, for .mission-card, and
+ * then hit again for .map-card (the passcode-gated military map was listed and
+ * playable on a brand-new profile) and .dev-panel (the unfinished-work
+ * workbench was open to every player).
+ *
+ * Patching the next selector was never going to end. This ends it.
+ */
+[hidden] {
+  display: none !important;
+}
+
+:root {
+  --bg: #070c15;
+  --panel: rgba(12, 20, 34, 0.72);
+  --panel-solid: #0e1726;
+  --panel-line: rgba(140, 180, 230, 0.18);
+  --text: #eaf1fb;
+  --text-dim: #9fb2cc;
+  --accent: #58c6ff;
+  --accent-2: #7ee8b2;
+  --amber: #ffc247;
+  --red: #ff6a5a;
+  --good: #4fd684;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --radius: 16px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+/* There is deliberately no vignette layer. A dark gradient over the whole
+   screen dims the view all the time for a look nobody asked for, and it is the
+   first thing anyone tries to delete. The 3D view is the picture. */
+
+.ui-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+.ui-root button,
+.ui-root a,
+.ui-root input,
+.ui-root select,
+.ui-root .screen,
+.ui-root .hud-panel,
+.ui-root .hud-buttons { pointer-events: auto; }
+
+/* ============================== Loading ================================= */
+
+.loading {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(1200px 700px at 50% 30%, #14263f 0%, #070c15 70%);
+  transition: opacity 0.5s ease;
+}
+/* Once it has faded it must not intercept clicks, even for the half second
+   before the [hidden] attribute lands. */
+.loading.is-done { opacity: 0; pointer-events: none; }
+/* The class-based `display: grid` above would otherwise beat the [hidden]
+   attribute and leave an invisible overlay swallowing every click. */
+.loading[hidden] { display: none; }
+.loading-inner { text-align: center; width: min(520px, 84vw); }
+.loading-mark { margin-bottom: 10px; }
+.loading h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 22px; }
+.loading-track {
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.loading-bar {
+  height: 100%;
+  width: 3%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.25s ease;
+}
+.loading-msg { color: var(--text-dim); font-size: 14px; margin: 14px 0 4px; }
+.loading-tip { color: rgba(159, 178, 204, 0.7); font-size: 13px; margin: 0; font-style: italic; }
+
+.fatal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 12, 21, 0.96);
+  text-align: center;
+}
+/* Same trap as the loading screen: the class-based `display: grid` above beats
+   the [hidden] attribute, so without this the error panel sits over the entire
+   game as a near-black sheet, swallowing every click, at all times. */
+.fatal[hidden] { display: none; }
+.fatal h2 { margin: 0 0 10px; }
+.fatal pre {
+  text-align: left;
+  max-width: 720px;
+  max-height: 240px;
+  overflow: auto;
+  background: #0c1422;
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 12px;
+  color: #ffb0a5;
+}
+
+/* ================================ HUD =================================== */
+
+.hud { position: absolute; inset: 0; font-variant-numeric: tabular-nums; }
+.hud.is-large { font-size: 118%; }
+
+.hud-panel {
+  position: absolute;
+  background: var(--panel);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+}
+
+.hud-left { left: 16px; top: 16px; min-width: 208px; }
+.hud-row {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  grid-template-rows: auto auto;
+  align-items: baseline;
+  column-gap: 8px;
+  padding: 5px 0;
+}
+.hud-row + .hud-row { border-top: 1px solid rgba(140, 180, 230, 0.1); }
+.hud-label { grid-row: 1; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.hud-valuewrap { grid-row: 1; display: flex; align-items: baseline; gap: 4px; }
+.hud-value { font-size: 27px; font-weight: 640; line-height: 1; letter-spacing: -0.02em; }
+.hud-value.is-warn { color: var(--amber); }
+.hud-unit { font-size: 11px; color: var(--text-dim); }
+.hud-word { grid-column: 1 / -1; grid-row: 2; font-size: 12px; color: var(--accent); }
+
+.hud-top {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, 52vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.hud-objective {
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  text-align: center;
+  box-shadow: var(--shadow);
+  width: 100%;
+}
+.hud-objective-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+.hud-objective-text { font-size: 15px; line-height: 1.34; }
+.hud-objective-text.is-flash { animation: flashIn 0.6s ease; }
+@keyframes flashIn {
+  0% { color: var(--amber); transform: scale(1.02); }
+  100% { color: var(--text); transform: scale(1); }
+}
+
+.hud-waypoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(12, 20, 34, 0.6);
+  border: 1px solid var(--panel-line);
+  border-radius: 99px;
+  padding: 5px 14px 5px 8px;
+  font-size: 13px;
+  backdrop-filter: blur(10px);
+}
+.hud-arrow { color: var(--amber); font-size: 17px; line-height: 1; transition: transform 0.12s linear; }
+
+.hud-right { right: 16px; top: 16px; display: flex; gap: 12px; align-items: center; }
+.hud-windrose {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  border: 1px solid rgba(140, 180, 230, 0.3);
+  background: radial-gradient(circle, rgba(88, 198, 255, 0.12), transparent 70%);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.hud-windneedle {
+  font-size: 26px;
+  line-height: 1;
+  color: var(--accent);
+  transition: transform 0.2s ease-out;
+}
+.hud-windrose-label {
+  position: absolute;
+  top: -2px;
+  font-size: 9px;
+  color: var(--text-dim);
+}
+.hud-windinfo { min-width: 150px; }
+.hud-windtext { font-size: 14px; font-weight: 600; }
+.hud-winddetail { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+.hud-weather { font-size: 11px; color: var(--accent-2); margin-top: 3px; }
+
+.hud-bottom { left: 16px; bottom: 16px; min-width: 268px; }
+.hud-bar { display: grid; grid-template-columns: 52px 1fr 42px; align-items: center; gap: 8px; margin-bottom: 7px; }
+.hud-bar-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.hud-bar-track { height: 9px; border-radius: 99px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.hud-bar-fill { height: 100%; border-radius: 99px; transition: width 0.1s linear; }
+.hud-bar-fill.is-throttle { background: linear-gradient(90deg, #3ec96a, #9ae66e); }
+.hud-bar-fill.is-fuel { background: linear-gradient(90deg, #58c6ff, #7ee8b2); }
+.hud-bar-fill.is-low { background: linear-gradient(90deg, #ff6a5a, #ffc247); }
+.hud-bar-value { font-size: 12px; color: var(--text-dim); text-align: right; font-family: var(--mono); }
+
+.hud-keyhint {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  margin: 2px 0 6px;
+  letter-spacing: 0.01em;
+}
+.hud-keyhint kbd { font-size: 10px; padding: 0 4px; border-bottom-width: 1px; }
+
+.hud-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.hud-chip {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-dim);
+  border: 1px solid transparent;
+}
+.hud-chip.is-good { color: var(--good); border-color: rgba(79, 214, 132, 0.4); }
+.hud-chip.is-warn { color: var(--amber); border-color: rgba(255, 194, 71, 0.4); }
+.hud-chip.is-on { color: #fff; background: rgba(255, 106, 90, 0.35); border-color: rgba(255, 106, 90, 0.6); }
+
+.hud-buttons { position: absolute; right: 16px; bottom: 16px; display: flex; gap: 8px; }
+.hud-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.15s ease;
+}
+.hud-btn:hover { background: rgba(88, 198, 255, 0.22); transform: translateY(-2px); }
+.hud-btn:active { transform: translateY(0); }
+.hud-btn.is-off { color: var(--red); }
+.hud-btn.is-on {
+  color: #0b1220;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.hud-chip-ap.is-on {
+  border-color: rgba(124, 199, 255, 0.7);
+  color: #cfeaff;
+  background: rgba(124, 199, 255, 0.16);
+}
+
+.hud-stall {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 9px 20px;
+  border-radius: 10px;
+  background: rgba(255, 194, 71, 0.2);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-size: 14px;
+  animation: pulse 1s infinite;
+}
+.hud-stall.is-hard { background: rgba(255, 106, 90, 0.25); border-color: var(--red); color: #ffd9d3; }
+@keyframes pulse { 50% { opacity: 0.45; } }
+
+.hud-papi {
+  position: absolute;
+  bottom: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 16px;
+  border-radius: 99px;
+  font-size: 13px;
+  background: rgba(12, 20, 34, 0.7);
+  border: 1px solid var(--panel-line);
+  backdrop-filter: blur(10px);
+}
+.hud-papi.is-good { color: var(--good); border-color: rgba(79, 214, 132, 0.5); }
+.hud-papi.is-high, .hud-papi.is-slightlyHigh { color: var(--accent); }
+.hud-papi.is-low, .hud-papi.is-slightlyLow { color: var(--amber); }
+
+/*
+ * Clear of the radio.
+ *
+ * The coach line sat at 152 and the subtitle at 118, and the subtitle is 54 px
+ * tall for one line and more for two — so an ATC call was printed across the
+ * one line on screen that tells you which key to press next, at every window
+ * size, on every device. There is a rule at 620 px that lifts it; there was
+ * never one for anything wider.
+ *
+ * 224 clears a three-line call, which is the longest the director writes.
+ */
+.hud-coach {
+  position: absolute;
+  bottom: 224px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 9px 20px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 560;
+  text-align: center;
+  background: rgba(88, 198, 255, 0.16);
+  border: 1px solid rgba(88, 198, 255, 0.55);
+  color: #dff1ff;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  max-width: min(560px, 78vw);
+}
+.hud-coach kbd {
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.2);
+  margin: 0 1px;
+}
+.hud.is-contrast .hud-coach { background: #000; border-color: #ffe95c; color: #fff; }
+
+.hud-toasts {
+  position: absolute;
+  left: 50%;
+  top: 96px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  width: min(520px, 60vw);
+}
+.hud-toast {
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: rgba(12, 20, 34, 0.82);
+  border: 1px solid var(--panel-line);
+  backdrop-filter: blur(10px);
+  animation: toastIn 0.3s ease;
+  text-align: center;
+}
+.hud-toast.is-out { opacity: 0; transform: translateY(-6px); transition: all 0.35s ease; }
+.hud-toast.is-good { border-color: rgba(79, 214, 132, 0.5); color: #c9ffdd; }
+.hud-toast.is-warn { border-color: rgba(255, 194, 71, 0.5); color: #ffe6b3; }
+.hud-toast.is-bad { border-color: rgba(255, 106, 90, 0.6); color: #ffcfc8; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-8px); } }
+
+.hud-subtitle {
+  position: absolute;
+  bottom: 118px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, 78vw);
+  text-align: center;
+  background: rgba(6, 10, 18, 0.82);
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  padding: 9px 18px;
+  backdrop-filter: blur(10px);
+}
+.hud-subtitle-who {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin-bottom: 3px;
+}
+.hud-subtitle-text { font-size: 15px; line-height: 1.4; }
+
+/*
+ * The subtitle and the minimap were drawn on top of each other.
+ *
+ * The subtitle is centred and up to 720 px wide; the minimap is 190 px in the
+ * bottom-right corner. On a wide screen they never meet, which is why this
+ * went unnoticed — but below about 1180 px the subtitle's right-hand end runs
+ * straight across the map, and a radio call printed over the minimap makes
+ * both of them unreadable at once.
+ *
+ * Narrow: keep it centred and make it stop short of the map. Narrower still,
+ * where stopping short would leave it too thin to read a sentence in, lift it
+ * above the map instead and keep the full width.
+ */
+@media (max-width: 1180px) {
+  .hud.has-minimap .hud-subtitle { width: min(720px, calc(100vw - 440px)); }
+}
+@media (max-width: 900px) {
+  .hud.has-minimap .hud-subtitle { width: min(720px, 78vw); bottom: 312px; }
+}
+
+.hud-banner {
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  padding: 16px 34px;
+  border-radius: 18px;
+  background: rgba(6, 10, 18, 0.8);
+  border: 1px solid var(--panel-line);
+  backdrop-filter: blur(14px);
+  animation: bannerIn 0.45s cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+.hud-banner.is-good { border-color: rgba(79, 214, 132, 0.6); box-shadow: 0 0 40px rgba(79, 214, 132, 0.18); }
+.hud-banner.is-warn { border-color: rgba(255, 194, 71, 0.6); }
+.hud-banner.is-bad { border-color: rgba(255, 106, 90, 0.7); box-shadow: 0 0 40px rgba(255, 106, 90, 0.2); }
+.hud-banner-title { font-size: 26px; font-weight: 680; letter-spacing: -0.01em; }
+.hud-banner-sub { font-size: 14px; color: var(--text-dim); margin-top: 4px; }
+@keyframes bannerIn { from { opacity: 0; transform: translateX(-50%) scale(0.92); } }
+
+.hud-controls-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(860px, 92vw);
+  max-height: 84vh;
+  overflow: auto;
+  background: rgba(8, 14, 24, 0.94);
+  border: 1px solid var(--panel-line);
+  border-radius: 18px;
+  padding: 22px 26px;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+.cc-head { font-size: 20px; font-weight: 650; margin-bottom: 14px; }
+.cc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
+.cc-group h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+.cc-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 3px 0; }
+.cc-keys { color: var(--text-dim); }
+.cc-foot { margin-top: 16px; font-size: 12px; color: var(--text-dim); }
+kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--panel-line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ============================== Menus =================================== */
+
+/* Light scrim only — the island and sky stay visible behind the menus, which
+   looks far better than a near-black wash. */
+.menu-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  /* The bar takes the first row; whichever screen is visible takes the second.
+     Hidden screens are display:none and so are not grid items at all, which is
+     why one row is enough for eight of them. */
+  grid-template-rows: auto minmax(0, 1fr);
+  place-items: center;
+  background: linear-gradient(180deg, rgba(7, 12, 21, 0.42) 0%, rgba(7, 12, 21, 0.55) 55%, rgba(7, 12, 21, 0.7) 100%);
+  backdrop-filter: blur(3px) saturate(1.05);
+  -webkit-backdrop-filter: blur(3px) saturate(1.05);
+  pointer-events: auto;
+  overflow: auto;
+}
+.menu-layer[hidden] { display: none; }
+
+/* ---- The bar above every menu: which game, and what you are worth ---- */
+.menu-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px max(14px, env(safe-area-inset-left)) 10px max(14px, env(safe-area-inset-right));
+  padding-top: max(10px, env(safe-area-inset-top));
+  background: rgba(8, 13, 22, 0.55);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(8px) saturate(1.1);
+  -webkit-backdrop-filter: blur(8px) saturate(1.1);
+}
+.switcher {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+/* :where() so the shared button rules in .screen-list cannot out-specify the
+   lit state. That exact collision hid the selected item on three screens. */
+.switcher button:where(.switch-btn) {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(233, 240, 250, 0.66);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.switcher button:where(.switch-btn):hover { background: rgba(255, 255, 255, 0.08); color: #eef4fc; }
+.switcher button:where(.switch-btn).is-on {
+  background: var(--accent);
+  color: #0b1220;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+.switcher .icon { flex: 0 0 auto; }
+
+.credit-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 210, 120, 0.3);
+  background: rgba(255, 198, 92, 0.12);
+  color: #ffd98a;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.credit-pill:hover { background: rgba(255, 198, 92, 0.2); }
+
+/* The bar is the top row, so the screens no longer own the whole window. */
+.menu-layer > .screen { grid-row: 2; }
+
+/* Screens must scroll. The Free Flight screen grew to 1,780 px tall in an
+   825 px window and simply ran off the bottom — everything below the fold was
+   unreachable, which reads as "I cannot select anything". */
+.screen {
+  width: min(1080px, 94vw);
+  padding: 28px 0 40px;
+  /* 100% of the row the bar left behind, not of the window — a screen sized to
+     the viewport would push its own last rows under the bottom edge. */
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.screen[hidden] { display: none; }
+
+.brand { display: flex; align-items: center; gap: 18px; margin-bottom: 26px; color: var(--accent); }
+.brand h1 {
+  margin: 0;
+  font-size: clamp(26px, 4.6vw, 42px);
+  font-weight: 680;
+  letter-spacing: -0.025em;
+  color: var(--text);
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7);
+}
+.tagline { margin: 4px 0 0; color: #cfdcec; font-size: 15px; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7); }
+
+.main-nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.card-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  border: 1px solid var(--panel-line);
+  background: linear-gradient(160deg, rgba(20, 32, 52, 0.9), rgba(11, 18, 32, 0.9));
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.card-btn:hover {
+  transform: translateY(-3px);
+  border-color: rgba(88, 198, 255, 0.6);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
+}
+.card-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card-icon {
+  font-size: 22px;
+  color: var(--accent);
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(88, 198, 255, 0.14);
+  flex: none;
+}
+.card-body { display: flex; flex-direction: column; gap: 3px; }
+.card-body strong { font-size: 17px; font-weight: 620; }
+.card-body em { font-style: normal; font-size: 13px; color: var(--text-dim); }
+
+.main-foot { margin-top: 26px; }
+.stats { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: #c3d2e4; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8); }
+.stats b { color: var(--text); }
+.stats .ok { color: var(--good); }
+.foot-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.tiny { font-size: 12px; color: rgba(200, 214, 232, 0.85); margin-top: 12px; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.8); }
+.ghost.is-live { border-color: rgba(126, 232, 178, 0.6); color: #b9f5d5; }
+
+button, .ghost {
+  font: inherit;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+/* Same trap again: `display: inline-block` below beats [hidden], which made
+   the Install button show on browsers that never offered an install prompt. */
+.ghost[hidden] { display: none; }
+.ghost {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--panel-line);
+  color: var(--text);
+  padding: 8px 14px;
+  text-decoration: none;
+  display: inline-block;
+  font-size: 13px;
+}
+.ghost:hover { background: rgba(88, 198, 255, 0.16); border-color: rgba(88, 198, 255, 0.5); }
+button.primary {
+  background: linear-gradient(135deg, var(--accent), #3aa8e8);
+  border: none;
+  color: #05101c;
+  font-weight: 640;
+  padding: 10px 18px;
+}
+button.primary:hover { transform: translateY(-2px); }
+button.primary.big { width: 100%; padding: 14px; font-size: 16px; margin-top: 10px; }
+/*
+ * The default look for plain buttons on a list screen.
+ *
+ * The exclusions used to be written with :not(), and every :not() adds the
+ * specificity of what is inside it — five of them made this rule weigh
+ * (0,6,1), which beat every `.is-on` selected state in the file at (0,2,0).
+ * The result was buttons that took the class, updated the summary and fired
+ * their handler while looking completely untouched: you could select an
+ * aeroplane or a departure and nothing lit up. `:not(.preset)` is the fossil
+ * of the same bug being patched once, for presets only.
+ *
+ * :where() contributes no specificity at all, so this stays a (0,1,1) default
+ * that anything more specific can override — which is what a default should
+ * have been in the first place.
+ */
+.pause-actions button:where(:not(.primary)),
+.screen-list button:where(:not(.primary):not(.ghost):not(.tab):not(.keycap):not(.preset):not(.start-opt):not(.fleet-card)) {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--panel-line);
+  color: var(--text);
+  padding: 10px 16px;
+}
+
+.screen-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.screen-head h2 { margin: 0; font-size: 25px; font-weight: 650; text-shadow: 0 2px 14px rgba(0, 0, 0, 0.7); }
+
+.mission-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.mission-card {
+  background: linear-gradient(165deg, rgba(20, 32, 52, 0.92), rgba(11, 18, 32, 0.92));
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mission-top { display: flex; gap: 14px; align-items: flex-start; }
+.mission-icon {
+  font-size: 20px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(126, 232, 178, 0.14);
+  color: var(--accent-2);
+  flex: none;
+}
+.mission-card h3 { margin: 0 0 5px; font-size: 18px; }
+.mission-diff {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 99px;
+  margin-right: 8px;
+}
+.diff-easy { background: rgba(79, 214, 132, 0.2); color: #9df3bd; }
+.diff-medium { background: rgba(255, 194, 71, 0.2); color: #ffdc9b; }
+.diff-hard { background: rgba(255, 106, 90, 0.2); color: #ffb7ac; }
+.mission-sub { font-size: 12px; color: var(--text-dim); }
+.mission-card p { margin: 0; font-size: 14px; line-height: 1.45; color: #d3dfef; }
+.mission-learn { font-size: 12.5px !important; color: var(--accent) !important; }
+.mission-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mission-best { font-size: 12px; color: var(--text-dim); }
+.mission-best .ok { color: var(--good); }
+
+/* ---- Map picker ---- */
+.map-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.map-card {
+  background: linear-gradient(165deg, rgba(20, 32, 52, 0.92), rgba(11, 18, 32, 0.92));
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+.map-card.is-current { border-color: var(--accent); }
+.map-card:hover { transform: translateY(-2px); }
+.map-art { display: flex; justify-content: center; }
+.map-thumb {
+  width: 100%;
+  max-width: 190px;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: 10px;
+  border: 1px solid var(--panel-line);
+  image-rendering: auto;
+}
+.map-card h3 { margin: 0 0 4px; font-size: 18px; }
+.map-sub { font-size: 12px; color: var(--text-dim); display: block; margin-bottom: 6px; }
+.map-diff {
+  display: inline-block;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  padding: 2px 9px;
+  border-radius: 99px;
+  margin-bottom: 8px;
+  background: rgba(124, 199, 255, 0.16);
+  color: #bfe2ff;
+}
+.map-diff.diff-1 { background: rgba(79, 214, 132, 0.2); color: #9df3bd; }
+.map-diff.diff-2 { background: rgba(140, 214, 132, 0.2); color: #c6f3a8; }
+.map-diff.diff-3 { background: rgba(255, 194, 71, 0.2); color: #ffdc9b; }
+.map-diff.diff-4 { background: rgba(255, 149, 71, 0.22); color: #ffc79b; }
+.map-diff.diff-5 { background: rgba(255, 106, 90, 0.22); color: #ffb7ac; }
+.map-card p { margin: 0; font-size: 13.5px; line-height: 1.45; color: #d3dfef; }
+.map-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.map-current { font-size: 12px; color: var(--accent); }
+
+.free-body {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 22px;
+  background: rgba(9, 15, 26, 0.78);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+.free-col h3 { margin: 0 0 12px; font-size: 15px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.08em; text-shadow: 0 1px 10px rgba(0, 0, 0, 0.8); }
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+.preset {
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: rgba(16, 26, 43, 0.85);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.preset strong { font-size: 14px; }
+.preset em { font-style: normal; font-size: 12px; color: var(--text-dim); }
+.preset:hover { border-color: rgba(88, 198, 255, 0.5); }
+.preset.is-on { border-color: var(--accent); background: rgba(88, 198, 255, 0.14); }
+
+.field { display: block; margin-bottom: 14px; font-size: 13px; color: var(--text-dim); }
+.field span { display: block; margin-bottom: 6px; }
+.field b { color: var(--text); }
+.field select, .field input[type='range'] {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--panel-line);
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+.field input[type='range'] { padding: 0; height: 26px; accent-color: var(--accent); }
+.check { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; font-size: 13.5px; }
+.check input { margin-top: 2px; accent-color: var(--accent); width: 17px; height: 17px; }
+.hint { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; margin: 4px 0 16px; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+.tab {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.tab.is-on { background: rgba(88, 198, 255, 0.16); color: var(--text); border-color: rgba(88, 198, 255, 0.45); }
+.tab-body {
+  max-width: 760px;
+  background: rgba(9, 15, 26, 0.8);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+}
+.fps-box { font-size: 13px; color: var(--text-dim); margin-top: 10px; }
+
+.keymap { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; margin-bottom: 18px; }
+.keymap-group h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); }
+.keymap-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 13px; }
+.keycap {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--panel-line);
+  color: var(--text);
+  padding: 5px 10px;
+  min-width: 74px;
+}
+.keycap.is-listening { border-color: var(--amber); color: var(--amber); }
+
+.credits {
+  max-width: 900px;
+  font-size: 14px;
+  line-height: 1.55;
+  background: rgba(9, 15, 26, 0.82);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+}
+.credit-block { margin-bottom: 26px; }
+.credit-block h3 { font-size: 16px; margin: 0 0 10px; color: var(--accent); }
+.credit-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.credit-table th, .credit-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(140, 180, 230, 0.14);
+  vertical-align: top;
+}
+.credit-table th { color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.08em; }
+.credit-table a { color: var(--accent); }
+.credit-list { padding-left: 20px; font-size: 13px; }
+.credits code { font-family: var(--mono); font-size: 12px; background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 4px; }
+.note {
+  background: rgba(88, 198, 255, 0.08);
+  border-left: 3px solid var(--accent);
+  padding: 12px 14px;
+  border-radius: 0 10px 10px 0;
+  font-size: 13px;
+}
+
+.screen-pause { display: grid; place-items: center; }
+.pause-card {
+  width: min(560px, 92vw);
+  background: rgba(10, 17, 29, 0.95);
+  border: 1px solid var(--panel-line);
+  border-radius: 20px;
+  padding: 26px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+.pause-card h2 { margin: 0 0 16px; font-size: 26px; }
+.pause-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.pause-grid span { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+.pause-grid b { font-size: 17px; color: var(--text); font-family: var(--mono); }
+.pause-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.debrief-card { text-align: center; }
+.debrief-title.is-good { color: var(--good); }
+.debrief-title.is-bad { color: var(--red); }
+.debrief-score { font-size: 54px; font-weight: 700; color: var(--accent); line-height: 1; margin-bottom: 12px; }
+.debrief-score span { font-size: 20px; color: var(--text-dim); }
+.debrief-list { list-style: none; padding: 0; margin: 0 0 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.debrief-list li { font-size: 13px; color: var(--text-dim); background: rgba(255, 255, 255, 0.05); border-radius: 10px; padding: 8px; }
+.debrief-list b { display: block; color: var(--text); font-size: 16px; margin-top: 2px; }
+.debrief-body p { font-size: 14px; color: #d3dfef; }
+.debrief-reason { color: var(--amber); font-weight: 600; }
+
+/* ===================== Accessibility variants =========================== */
+
+body.is-large { font-size: 18px; }
+.hud.is-contrast .hud-panel,
+.hud.is-contrast .hud-objective,
+.hud.is-contrast .hud-subtitle,
+.hud.is-contrast .hud-toast,
+.hud.is-contrast .hud-waypoint,
+.hud.is-contrast .hud-btn {
+  background: #000;
+  border-color: #fff;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.hud.is-contrast .hud-word,
+.hud.is-contrast .hud-objective-title,
+.hud.is-contrast .hud-weather { color: #ffe95c; }
+.hud.is-contrast .hud-value,
+.hud.is-contrast .hud-objective-text,
+.hud.is-contrast .hud-subtitle-text { color: #fff; }
+.hud.is-contrast .hud-label,
+.hud.is-contrast .hud-bar-label,
+.hud.is-contrast .hud-winddetail { color: #fff; }
+.hud.is-large .hud-value { font-size: 32px; }
+.hud.is-large .hud-objective-text { font-size: 17px; }
+.hud.is-large .hud-subtitle-text { font-size: 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001s !important; transition-duration: 0.05s !important; }
+}
+
+/* ========================= Small screens ================================ */
+
+@media (max-width: 900px) {
+  .free-body { grid-template-columns: 1fr; }
+  .hud-top { width: min(420px, 70vw); }
+  .hud-left, .hud-right, .hud-bottom { padding: 9px 11px; }
+  .hud-value { font-size: 22px; }
+  .pause-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 620px) {
+  .hud-left { min-width: 150px; }
+  /*
+   * On a phone there is no room beside the map for four readings — 161 px for
+   * four columns is a box each and no number in any of them. So the map
+   * shrinks to 130 and the strip goes underneath it, full width, which is the
+   * one arrangement where both are legible.
+   */
+  .minimap { width: 130px; height: 130px; }
+  .minimap-canvas { width: 130px; height: 130px; }
+  .hud.is-touch .hud-left { left: 8px; right: 8px; top: 146px; }
+  .hud.is-touch .hud-top { top: 232px; }
+  /* The coach line has to clear the touch controls, not sit under them. */
+  .hud-coach { bottom: auto; top: 108px; font-size: 14px; padding: 8px 14px; }
+  .hud-toasts { top: 130px; width: 84vw; }
+  .brand { flex-direction: column; align-items: flex-start; }
+}
+
+/* ---- Taxi strip ---------------------------------------------------------
+   Sits under the objective while you are taxiing out. The skip button is
+   deliberately large and always visible: nobody should be trapped taxiing.  */
+.hud-taxi {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--panel-line);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 10px 12px 10px 14px;
+  box-shadow: var(--shadow);
+}
+.hud-taxi-words { flex: 1; min-width: 0; }
+.hud-taxi-text { font-size: 14px; line-height: 1.35; }
+.hud-taxi-hint { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+.hud-taxi-skip {
+  flex: none;
+  border: 1px solid rgba(255, 194, 71, 0.55);
+  background: rgba(255, 194, 71, 0.14);
+  color: var(--amber);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 620;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease;
+}
+.hud-taxi-skip:hover { background: rgba(255, 194, 71, 0.26); }
+
+/* =========================================================================
+   Interface rework
+   =========================================================================
+   Three things drove this: nine quick buttons was too many to read at speed,
+   the icons were font glyphs that rendered differently on every machine, and
+   on a phone there was no way to fly at all.
+   ========================================================================= */
+
+/* ---- Icons -------------------------------------------------------------- */
+.icon { display: block; flex: none; }
+.hud-btn .icon { margin: 0 auto; }
+
+/* ---- Quick buttons and the overflow tray -------------------------------- */
+.hud-btn { display: grid; place-items: center; }
+.hud-btn.is-on .icon { color: #0b1220; }
+
+/* The attribute has to beat the class, or the tray is permanently open — the
+   same trap that once left a black sheet over the whole game. */
+.hud-tray[hidden] { display: none; }
+.hud-tray {
+  position: absolute;
+  right: 16px;
+  bottom: 66px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: auto;
+  animation: tray-in 0.16s ease-out;
+}
+@keyframes tray-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.hud-btn-wide {
+  width: auto;
+  height: 38px;
+  padding: 0 14px 0 11px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 560;
+  justify-content: flex-start;
+}
+.hud-tray .hud-btn-wide { min-width: 178px; }
+
+/* ---- Touch controls -----------------------------------------------------
+   Only built on a touch device. The left thumb flies (a stick that returns to
+   centre), the right thumb sets power on a vertical slider, and the four
+   things you reach for most sit between them as real buttons.               */
+.touch-layer {
+  position: absolute;
+  inset: 0;
+  display: none;
+  pointer-events: none;
+  touch-action: none;
+}
+.hud.is-touch .touch-layer { display: block; }
+
+.touch-stick {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  width: 148px;
+  height: 148px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+}
+.touch-stick::after {
+  /* Cross-hair, so it is obvious which way is which before you touch it. */
+  content: '';
+  position: absolute;
+  inset: 18px;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+}
+.touch-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 58px;
+  height: 58px;
+  margin: -29px 0 0 -29px;
+  border-radius: 50%;
+  background: rgba(88, 198, 255, 0.3);
+  border: 1px solid rgba(124, 199, 255, 0.75);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  transition: background 0.12s ease;
+}
+.touch-stick.is-held .touch-knob { background: rgba(88, 198, 255, 0.52); }
+
+.touch-throttle {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  width: 62px;
+  height: 176px;
+  border-radius: 18px;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+  overflow: hidden;
+}
+.touch-throttle-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 0;
+  background: linear-gradient(180deg, rgba(88, 198, 255, 0.55), rgba(88, 198, 255, 0.22));
+  transition: height 0.06s linear;
+}
+.touch-throttle-label {
+  position: absolute;
+  inset: auto 0 8px 0;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 640;
+  color: #e8f4ff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+.touch-throttle-ticks {
+  position: absolute;
+  inset: 10px 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.touch-pads {
+  position: absolute;
+  right: 96px;
+  bottom: 26px;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  pointer-events: auto;
+}
+.touch-pad {
+  min-width: 62px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 620;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.touch-pad.is-on { background: var(--accent); border-color: var(--accent); color: #0b1220; }
+.touch-pad:active { transform: scale(0.96); }
+
+/* Rudder: a wide strip along the bottom middle, where a thumb can reach it. */
+.touch-rudder {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  width: min(230px, 34vw);
+  height: 46px;
+  border-radius: 14px;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+  overflow: hidden;
+}
+.touch-rudder-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 40px;
+  margin-left: -20px;
+  border-radius: 12px;
+  background: rgba(88, 198, 255, 0.32);
+  border: 1px solid rgba(124, 199, 255, 0.6);
+}
+.touch-rudder-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+/*
+ * Touch layout, by class rather than by width.
+ *
+ * These rules moved the button tray out of the bottom-right corner — where the
+ * on-screen throttle lives — but they sat inside `@media (max-width: 820px)`,
+ * while the throttle is built on ANY device with a touch pointer. So on an
+ * iPad in landscape, or any touchscreen laptop, the throttle was drawn over
+ * the tray (it is appended later, so it paints on top) and the tray could not
+ * be pressed at all. `.is-touch` is exactly the condition; the width is not.
+ */
+.hud.is-touch .hud-bottom { display: none; }
+.hud.is-touch .hud-right { top: 74px; right: 12px; }
+.hud.is-touch .hud-buttons { right: 12px; bottom: auto; top: 12px; }
+
+/*
+ * Touch layout, continued — and this is the half that was still wrong.
+ *
+ * Every rule below is written `.hud.is-touch`, so it was already scoped to a
+ * touch device by class. It was then ALSO gated inside `@media (max-width:
+ * 820px)`, which is the thing the comment above says not to do — and an iPad
+ * in landscape is 1024 or 1366 CSS pixels wide, so not one of them applied on
+ * the device this game is actually played on.
+ *
+ * What that looked like on an iPad: the instrument strip stayed where the
+ * desktop puts it and ran underneath the button dock, which HAD been moved to
+ * the top right by the rule above — so vertical speed and heading were drawn
+ * behind three buttons. The overflow tray stayed in the bottom-right corner
+ * with the on-screen throttle painted over it, unpressable, which is the
+ * exact bug the comment above describes having fixed. The map stayed in that
+ * same corner. The thumb pads stayed a pixel inside the stick.
+ *
+ * The three rules that genuinely are about a narrow window — the menu
+ * screens, the buttons on them and the card grids — stay in the media query
+ * underneath. Nothing else in here was ever about width.
+ */
+/*
+ * The buttons live top-right on a touch device, so the instrument strip has
+ * to stop before them. It used to run to the right edge and the two sat on
+ * top of each other — measured, .hud-left 233x113 @134,8 against
+ * .hud-buttons 154x46 @209,12, a straight overlap over the tray.
+ *
+ * The minimap takes the top-left corner, so the strip starts after it too.
+ */
+/* min-width:150px was holding the strip wider than `right` asked for, so it
+   still ran under the tray. Overriding it is what actually makes room. */
+/*
+ * The instruments go *below* the tray, not beside it.
+ *
+ * Squeezing them into the gap left 67px of width — enough for a box, not
+ * enough for a number, which is worse than useless when the whole point is
+ * a glance. The buttons occupy y12-58 top-right; the map owns the top-left
+ * corner; so the strip starts under the buttons and runs to the edge, and
+ * the four readings sit in one row of large figures.
+ */
+/*
+ * Clear of the map, which is 190 px wide and not 130.
+ *
+ * `left: 134px` was measured against a smaller minimap; the map has grown
+ * since and now runs to x198, so the first of the four readings was drawn on
+ * top of it. Its own left edge is at 8, so 206 is the first free pixel.
+ */
+.hud.is-touch .hud-left {
+  left: 206px;
+  right: 8px;
+  top: 66px;
+  min-width: 0;
+  width: auto;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0 6px;
+  padding: 5px 8px;
+}
+.hud.is-touch .hud-left .hud-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+.hud.is-touch .hud-left .hud-label { font-size: 8px; min-width: 0; letter-spacing: 0.04em; }
+.hud.is-touch .hud-left .hud-value { font-size: 19px; line-height: 1.05; }
+.hud.is-touch .hud-left .hud-unit { font-size: 8px; }
+.hud.is-touch .hud-acname { display: none; }
+/*
+ * And the objective drops below the strip.
+ *
+ * The strip runs the full width under the buttons at y66, and the objective
+ * panel is centred at y16 and 78 px tall, so the two shared 28 px of screen —
+ * the instruction you are meant to be following, printed across the airspeed
+ * you are meant to be watching. The strip is the thing you glance at every few
+ * seconds, so it keeps the better position.
+ */
+.hud.is-touch .hud-top { top: 140px; }
+/* The pads sat one pixel inside the stick — a thumb does not miss by one
+   pixel, it presses the wrong thing. Measured stick 14-150, pads 149-291. */
+.hud.is-touch .touch-pads { right: 82px; bottom: 22px; }
+/*
+ * The map moves to the top-left corner on a touch device — and it never did.
+ *
+ * This was written `.hud.is-touch .minimap`, and the minimap is not inside the
+ * HUD: it and `.hud` are both children of `#ui`, so that is a descendant
+ * selector that has never matched anything, on a tablet or on a phone. The map
+ * stayed in the bottom-right corner with the throttle drawn over it the whole
+ * time.
+ *
+ * `html.is-touch-device` is the class the game already sets on the root for
+ * exactly this reason — the menus hit the same wall and solved it this way.
+ */
+html.is-touch-device .minimap { top: 8px; left: 8px; right: auto; bottom: auto; }
+/* And the objective panel steps aside for it, the way the instrument strip
+   already does — it is centred and wide, and ran straight under the map. */
+.hud.is-touch.has-minimap .hud-top { padding-left: 138px; }
+.hud.is-touch .hud-tray { right: 12px; top: 62px; bottom: auto; }
+.hud.is-touch .hud-taxi-skip { padding: 12px 16px; font-size: 14px; }
+
+/* ---- Narrow windows: the menu screens, which really are about width ------ */
+@media (max-width: 820px) {
+  .screen { padding: 16px 14px 28px; }
+  .card-btn { padding: 12px 14px; }
+  .fleet-grid, .preset-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 520px) {
+  .fleet-grid, .preset-grid { grid-template-columns: 1fr; }
+}
+
+
+/* ---- The hangar --------------------------------------------------------- */
+.fleet-grid {
+  display: grid;
+  /* Wider now that each card carries a plan view of the aeroplane beside the
+     numbers — at 220px the picture and the text fought each other. */
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 10px;
+}
+
+/* The picture of the aeroplane, drawn from its own shape data. */
+.fleet-art-slot {
+  display: block;
+  float: right;
+  width: 132px;
+  margin: -2px -4px 4px 12px;
+  border-radius: 10px;
+  background: linear-gradient(160deg, rgba(120, 180, 240, 0.14), rgba(10, 16, 26, 0.5));
+  border: 1px solid rgba(140, 180, 230, 0.16);
+  overflow: hidden;
+}
+.fleet-art {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.fleet-card.is-on .fleet-art-slot {
+  border-color: rgba(88, 198, 255, 0.55);
+  background: linear-gradient(160deg, rgba(88, 198, 255, 0.22), rgba(10, 16, 26, 0.5));
+}
+@media (max-width: 560px) {
+  .fleet-art-slot { width: 104px; }
+}
+.fleet-card {
+  text-align: left;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--panel-line);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+.fleet-card:hover { transform: translateY(-2px); border-color: rgba(124, 199, 255, 0.5); }
+.fleet-card.is-on { border-color: var(--accent); background: rgba(88, 198, 255, 0.13); }
+.fleet-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.fleet-name { font-weight: 640; font-size: 15px; }
+.fleet-class {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.fleet-blurb { font-size: 12.5px; color: var(--text-dim); margin: 6px 0 9px; line-height: 1.45; }
+.fleet-bars { display: grid; gap: 4px; }
+.fleet-bar { display: grid; grid-template-columns: 62px 1fr; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); }
+.fleet-pips { display: flex; gap: 3px; }
+.fleet-pip { width: 100%; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.13); }
+.fleet-pip.is-lit { background: var(--accent); }
+.fleet-numbers {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--panel-line);
+  display: flex;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.fleet-numbers b { color: var(--text); font-weight: 620; }
+
+/* ---- Start-position picker ---------------------------------------------
+   This is where the taxi lives now. It was a tick-box in Settings called
+   "Start on the parking stand", which is why nobody found it.              */
+.start-grid { display: grid; gap: 8px; }
+.start-opt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.start-opt:hover { border-color: rgba(124, 199, 255, 0.5); }
+.start-opt.is-on { border-color: var(--accent); background: rgba(88, 198, 255, 0.13); }
+.start-opt .icon { color: var(--accent); }
+.start-opt strong { display: block; font-size: 14px; font-weight: 600; }
+.start-opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* ---- Triggers panel ----------------------------------------------------- */
+.trigger-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(184px, 1fr)); gap: 8px; }
+.trigger-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.trigger-btn:hover { border-color: rgba(255, 106, 90, 0.55); background: rgba(255, 106, 90, 0.1); }
+.trigger-btn.is-on { border-color: var(--red); background: rgba(255, 106, 90, 0.18); color: #ffd9d3; }
+.trigger-btn .icon { color: var(--amber); flex: none; }
+.trigger-btn small { display: block; color: var(--text-dim); font-size: 11.5px; margin-top: 1px; }
+.trigger-note { font-size: 12px; color: var(--text-dim); margin: 2px 0 10px; }
+
+/* ---- Menu card icons ---------------------------------------------------- */
+.card-icon .icon { width: 24px; height: 24px; }
+.card-btn .card-icon { display: grid; place-items: center; color: var(--accent); }
+
+/* The Free Flight screen gained the hangar and the start picker, so it needs
+   three columns on a wide screen with the aircraft row across the top. */
+@media (min-width: 901px) {
+  .free-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .free-col-wide { grid-column: 1 / -1; }
+}
+.pause-sub {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.pause-actions button { display: inline-flex; align-items: center; gap: 8px; justify-content: center; }
+
+/* The realistic cockpit reads its instruments off the panel, so the overlay
+   that duplicates them gets out of the way. The objective, subtitles and
+   warnings stay — those are not instruments. */
+.hud.is-minimal .hud-left,
+.hud.is-minimal .hud-right,
+.hud.is-minimal .hud-bottom { opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+
+/* ---- Free Flight: four tabs and a bar that never moves ------------------ */
+.screen-free { display: flex; flex-direction: column; padding-bottom: 0; }
+.screen-free .tabs { margin-bottom: 14px; }
+.free-panel {
+  background: rgba(9, 15, 26, 0.78);
+  border: 1px solid var(--panel-line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.free-panel[hidden] { display: none; }
+/* The action bar is sticky, so it floats over whatever is at the bottom of the
+   panel — which was the last aeroplane in the list. Leave room for it. */
+.free-panel { padding-bottom: 74px; }
+.free-panel h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.free-two { display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; }
+
+/* The action bar sticks to the bottom of the screen, so "Take off" is
+   reachable no matter how tall the panel above it gets. */
+.free-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  margin: 0 0 16px;
+  border-radius: var(--radius);
+  background: rgba(9, 15, 26, 0.94);
+  border: 1px solid var(--panel-line);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.45);
+}
+.free-summary { flex: 1; min-width: 0; font-size: 13.5px; color: var(--text-dim); }
+.free-summary strong { color: var(--text); font-weight: 640; }
+.sum-warn { color: var(--amber); font-weight: 600; }
+/* `button.primary.big` is width:100% everywhere else, which inside the action
+   bar squeezed the summary down to one word per line beside it. In the bar it
+   is sized by its own text. */
+.free-bar .primary,
+.free-bar button.primary.big {
+  flex: 0 0 auto;
+  width: auto;
+  margin-top: 0;
+  padding: 13px 34px;
+  white-space: nowrap;
+}
+.free-summary { line-height: 1.4; }
+
+/* Compact fleet cards: five of them have to fit without a scroll. */
+.fleet-card { padding: 11px 12px; }
+.fleet-blurb { margin: 5px 0 7px; font-size: 12px; }
+.fleet-numbers { margin-top: 7px; padding-top: 6px; gap: 11px; }
+
+/* ---- Armed failures ---------------------------------------------------- */
+.fail-list { display: grid; gap: 8px; }
+.fail-row {
+  border: 1px solid var(--panel-line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--panel);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.fail-row.is-armed { border-color: rgba(255, 194, 71, 0.55); background: rgba(255, 194, 71, 0.08); }
+.fail-head { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.fail-head input { margin-top: 3px; flex: none; }
+.fail-head strong { display: block; font-size: 14px; font-weight: 600; }
+.fail-head em { display: block; font-style: normal; font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+.fail-sliders {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 18px;
+  margin: 10px 0 2px 26px;
+}
+.fail-sliders[hidden] { display: none; }
+.fail-sliders .field { margin: 0; }
+.fail-sliders .field span { font-size: 12px; }
+
+@media (max-width: 780px) {
+  .free-two, .fail-sliders { grid-template-columns: 1fr; }
+  .free-bar { flex-direction: column; align-items: stretch; gap: 10px; }
+  .free-bar .primary { width: 100%; }
+}
+
+/* An armed trigger has to be obviously armed. */
+.trigger-btn { position: relative; }
+.trigger-state {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 720;
+  letter-spacing: 0.1em;
+  color: var(--red);
+  align-self: center;
+}
+.trigger-btn.is-on {
+  border-color: var(--red);
+  background: rgba(255, 106, 90, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(255, 106, 90, 0.35);
+}
+.trigger-btn.is-on .icon { color: var(--red); }
+
+.check-wide { align-items: flex-start; gap: 10px; margin-top: 12px; }
+.check-wide strong { display: block; font-size: 14px; font-weight: 600; }
+.check-wide em { display: block; font-style: normal; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* The aeroplane you are flying, at the top of the flight-data panel. */
+.hud-acname {
+  font-size: 11.5px;
+  font-weight: 640;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 7px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--panel-line);
+}
+.hud-acname:empty { display: none; }
+
+/* A lightning strike knocks the electrics about: instruments dark, and the
+   warnings stay lit because those are on their own supply. */
+.hud.is-blackout .hud-left,
+.hud.is-blackout .hud-right,
+.hud.is-blackout .hud-bottom {
+  /*
+   * The readouts do not just go dark — they go red and blink.
+   *
+   * Fading them to 6% told you the panel had died but nothing about why, and
+   * a dead-black corner of the screen reads as "the game stopped drawing"
+   * rather than "your instruments have failed". Red, flickering at mains-ish
+   * speed, is unmistakably a fault: you can still make out where the numbers
+   * were, and it is obvious they are not to be trusted.
+   */
+  animation: instruments-dead 0.55s steps(2, end) infinite;
+  /* Steps, so it cuts out like a supply failing rather than dissolving. */
+  transition: opacity 0.1s steps(2), filter 0.1s;
+}
+@keyframes instruments-dead {
+  0%,
+  49% {
+    opacity: 0.42;
+    filter: grayscale(1) sepia(1) hue-rotate(-38deg) saturate(7) brightness(0.9);
+    text-shadow: 0 0 12px rgba(255, 50, 32, 0.75);
+  }
+  50%,
+  100% {
+    opacity: 0.09;
+    filter: grayscale(1) sepia(1) hue-rotate(-38deg) saturate(4) brightness(0.55);
+    text-shadow: none;
+  }
+}
+/* Coming back: a proper fade-in, as an instrument spinning up would. */
+.hud.is-recovering .hud-left,
+.hud.is-recovering .hud-right,
+.hud.is-recovering .hud-bottom {
+  animation: instruments-back 1.3s ease-out;
+}
+@keyframes instruments-back {
+  0% { opacity: 0.06; filter: grayscale(1); }
+  18% { opacity: 0.55; filter: grayscale(0.6); }
+  26% { opacity: 0.12; filter: grayscale(0.9); }
+  100% { opacity: 1; filter: none; }
+}
+
+.hud-blackout {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  padding: 10px 22px;
+  border: 2px solid var(--red);
+  border-radius: 10px;
+  color: #ffd9d3;
+  background: rgba(120, 20, 12, 0.32);
+  font-size: 15px;
+  font-weight: 720;
+  letter-spacing: 0.22em;
+  opacity: 0;
+  pointer-events: none;
+  display: none;
+}
+.hud-blackout.is-on { display: block; animation: blackout-pulse 1s steps(1, end) infinite; }
+@keyframes blackout-pulse {
+  0%, 49% { opacity: 0.95; box-shadow: 0 0 30px rgba(255, 60, 40, 0.55); }
+  50%, 100% { opacity: 0.25; box-shadow: none; }
+}
+.fail-heading {
+  margin: 20px 0 6px;
+  font-size: 13px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* The disasters list spans both weather columns. */
+.free-two { grid-template-areas: none; }
+.free-col-full { grid-column: 1 / -1; }
+
+
+/* ---- Pause menu, made small again -------------------------------------
+   It grew an autopilot section, a view section, eight triggers and seven
+   disasters, and became a wall. Now it is a compact card that scrolls, the
+   secondary sections are folded away behind summaries, and the buttons you
+   actually want are the ones you see first.                              */
+.pause-card {
+  max-height: 88vh;
+  max-height: 88dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 22px;
+  width: min(680px, 94vw);
+}
+.pause-card h2 { margin: 0 0 10px; font-size: 22px; }
+.pause-grid { gap: 8px; margin-bottom: 12px; }
+.pause-sub { margin: 12px 0 6px; font-size: 11px; }
+.pause-card .tiny { margin-top: 12px; }
+
+/* Folded sections. <details> is the whole mechanism — no script needed. */
+.pause-fold { margin-top: 10px; border-top: 1px solid var(--panel-line); padding-top: 8px; }
+.pause-fold > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 5px 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pause-fold > summary::-webkit-details-marker { display: none; }
+.pause-fold > summary::after { content: '▾'; margin-left: auto; transition: transform 0.15s ease; }
+.pause-fold[open] > summary::after { transform: rotate(180deg); }
+.pause-fold > summary:hover { color: var(--text); }
+.pause-fold .trigger-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
+.pause-fold .trigger-btn { padding: 7px 10px; font-size: 12px; }
+.pause-fold .trigger-btn small { font-size: 10.5px; }
+.pause-fold .start-opt { padding: 8px 10px; }
+.pause-fold .start-opt em { font-size: 11px; }
+.pause-fold .trigger-note { margin: 2px 0 8px; font-size: 11.5px; }
+
+/* Autopilot: which mode is actually flying, and the height selector. */
+.ap-state {
+  margin-left: auto;
+  align-self: center;
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.12em;
+  color: #0b1220;
+}
+.start-opt.is-on .ap-state { color: #0b1220; }
+.ap-alt { margin-top: 10px; }
+.ap-alt span { font-size: 12px; }
+
+/* Where the tornado is. Sits under the objective, hard to miss on purpose. */
+.hud-hazard {
+  position: absolute;
+  top: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 106, 90, 0.7);
+  background: rgba(90, 22, 16, 0.55);
+  color: #ffd9d3;
+  font-size: 13px;
+  font-weight: 560;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.hud-hazard b { color: #fff; letter-spacing: 0.12em; margin-right: 4px; }
+
+/* A switch and a slider per sound source, on one line. */
+.sound-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) 1fr;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.sound-row .check { margin: 0; }
+.sound-row .field { margin: 0; }
+.sound-row .field span { font-size: 12px; color: var(--text-dim); min-height: 0; }
+.sound-switch input:not(:checked) ~ span { color: var(--text-dim); }
+@media (max-width: 620px) {
+  .sound-row { grid-template-columns: 1fr; gap: 4px; }
+}
+
+/* ---- Key monitor -------------------------------------------------------- */
+/* A small keyboard that lights up as you fly. Off by default and toggled from
+   the tray — it is a diagnostic for "is this key even registering?", and for
+   noticing your own hands, not something to leave on. */
+.hud-keys {
+  position: absolute;
+  left: 14px;
+  bottom: 96px;
+  padding: 8px 9px 6px;
+  border-radius: 10px;
+  background: rgba(8, 13, 22, 0.72);
+  border: 1px solid rgba(140, 180, 230, 0.2);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  font-size: 11px;
+}
+.hud-keys-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  justify-content: center;
+}
+.hud-key {
+  min-width: 34px;
+  padding: 5px 6px;
+  text-align: center;
+  border-radius: 5px;
+  border: 1px solid rgba(150, 180, 215, 0.28);
+  background: rgba(255, 255, 255, 0.05);
+  color: #9aa8bb;
+  font-weight: 640;
+  letter-spacing: 0.02em;
+  transition: background 0.06s linear, color 0.06s linear, border-color 0.06s linear;
+}
+.hud-key.is-down {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #08111d;
+  box-shadow: 0 0 12px rgba(88, 198, 255, 0.55);
+}
+.hud-keys-axes {
+  margin-top: 3px;
+  text-align: center;
+  color: #7f8ea3;
+  font-family: 'Courier New', monospace;
+  font-size: 10px;
+  letter-spacing: -0.02em;
+}
+@media (max-width: 560px) {
+  .hud-keys { display: none; }
+}
+
+/* ---- Patient vitals ----------------------------------------------------- */
+/* Only shown by missions that carry someone. A real number and a beating
+   trace, because "there is a person in the back" should not read as a bar. */
+.hud-vital {
+  position: absolute;
+  right: 16px;
+  top: 190px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 8px;
+  border-radius: 10px;
+  background: rgba(8, 13, 22, 0.78);
+  border: 1px solid rgba(62, 201, 106, 0.35);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.hud-vital.is-warn { border-color: rgba(255, 176, 32, 0.6); }
+.hud-vital.is-bad {
+  border-color: rgba(255, 90, 60, 0.85);
+  box-shadow: 0 0 22px rgba(255, 70, 45, 0.35);
+  animation: vital-alarm 0.9s ease-in-out infinite;
+}
+@keyframes vital-alarm {
+  0%, 100% { box-shadow: 0 0 22px rgba(255, 70, 45, 0.30); }
+  50% { box-shadow: 0 0 30px rgba(255, 70, 45, 0.6); }
+}
+.hud-vital-trace { display: block; }
+.hud-vital-label {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: #7f8ea3;
+  font-weight: 640;
+}
+.hud-vital-value {
+  font-size: 21px;
+  font-weight: 680;
+  color: #e8eaee;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.hud-vital.is-warn .hud-vital-value { color: #ffc95e; }
+.hud-vital.is-bad .hud-vital-value { color: #ff7a5e; }
+.hud-vital-unit { font-size: 11px; color: #7f8ea3; margin-left: 3px; font-weight: 600; }
+@media (max-width: 560px) { .hud-vital { top: 150px; right: 10px; transform: scale(0.85); } }
+
+/* ---- Saved Free Flight setups ------------------------------------------- */
+.free-slots { margin-top: 14px; }
+.free-slots-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 640;
+  color: var(--text-dim);
+}
+.slot-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.slot {
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px dashed rgba(140, 180, 230, 0.28);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-dim);
+  cursor: pointer;
+  min-height: 52px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.slot:hover { border-color: rgba(124, 199, 255, 0.55); }
+.slot strong { display: block; font-size: 12.5px; font-weight: 650; color: var(--text); }
+.slot em {
+  display: block;
+  font-style: normal;
+  font-size: 10.5px;
+  margin-top: 2px;
+  color: var(--text-dim);
+  line-height: 1.25;
+}
+.slot.is-filled {
+  border-style: solid;
+  border-color: rgba(140, 180, 230, 0.3);
+  background: var(--panel);
+}
+.slot.is-loaded { border-color: var(--accent); background: rgba(88, 198, 255, 0.13); }
+@media (max-width: 720px) { .slot-row { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- Minimap ------------------------------------------------------------ */
+/* North is always up: a map that spins with you is easier to follow and much
+   harder to learn, because the place never looks the same twice. */
+.minimap {
+  position: absolute;
+  right: 16px;
+  bottom: 108px;
+  width: 190px;
+  height: 190px;
+  border-radius: 50%;
+  background: rgba(8, 13, 22, 0.82);
+  border: 2px solid rgba(140, 180, 230, 0.3);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  overflow: hidden;
+}
+.minimap.is-alert {
+  border-color: rgba(255, 80, 55, 0.9);
+  animation: minimap-alert 0.7s ease-in-out infinite;
+}
+@keyframes minimap-alert {
+  0%, 100% { box-shadow: 0 8px 28px rgba(0,0,0,0.45), 0 0 16px rgba(255,70,45,0.35); }
+  50% { box-shadow: 0 8px 28px rgba(0,0,0,0.45), 0 0 30px rgba(255,70,45,0.75); }
+}
+.minimap-canvas { display: block; width: 190px; height: 190px; }
+.minimap-warn {
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  transform: translateX(-50%);
+  padding: 3px 9px;
+  border-radius: 5px;
+  background: rgba(200, 40, 25, 0.92);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 720;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+.minimap-scale {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: #8fa2b4;
+  font-weight: 620;
+}
+@media (max-width: 560px) { .minimap { width: 132px; height: 132px; bottom: 92px; } .minimap-canvas { width: 132px; height: 132px; } }
+
+/* Inside 125 m the waypoint readout goes green — that is the part of the
+   approach where the number actually matters. */
+.hud-waypoint.is-near .hud-waypoint-text { color: #7dffb4; font-weight: 680; }
+.hud-waypoint.is-near .hud-arrow { color: #7dffb4; }
+
+/* ---- Mobile ------------------------------------------------------------- *
+ *
+ * A phone is not a small desktop. The readouts that sit comfortably at the
+ * corners of a laptop cover most of a handset, the touch targets that a mouse
+ * hits exactly need a thumb's worth of room, and anything the thumbs rest on
+ * must not have something else stacked on top of it.
+ *
+ * Measured rather than guessed: the minimap at right:10 bottom:92 (132 square)
+ * overlapped the touch throttle at right:14 bottom:14 (54x150) — it sat
+ * directly on the control you hold down for the whole flight.
+ */
+@media (max-width: 760px), (pointer: coarse) {
+  /* The minimap moves to the top-left, clear of both thumbs. */
+  .minimap {
+    top: 8px;
+    left: 8px;
+    right: auto;
+    bottom: auto;
+    width: 118px;
+    height: 118px;
+  }
+  .minimap-canvas { width: 118px; height: 118px; }
+  .minimap-scale { bottom: 6px; font-size: 9px; }
+  .minimap-warn { bottom: 22px; font-size: 9px; padding: 2px 6px; }
+
+  /* Instruments: a single compact strip rather than three floating panels. */
+  .hud-left {
+    top: 8px;
+    left: 134px;
+    right: 8px;
+    padding: 6px 9px;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 2px 10px;
+  }
+  .hud-left .hud-row { display: flex; align-items: baseline; gap: 6px; }
+  .hud-left .hud-label { font-size: 9px; min-width: 58px; }
+  .hud-left .hud-value { font-size: 17px; }
+  /* The plain-English word under each number is lovely on a laptop and simply
+     will not fit next to a thumb. The numbers keep their units. */
+  .hud-left .hud-word { display: none; }
+  .hud-acname { font-size: 10px; }
+
+  /* Weather goes away; the wind is on the map and in the briefing. */
+  .hud-right { display: none; }
+
+  .hud-bottom { left: 8px; right: 8px; bottom: 176px; padding: 6px 9px; }
+  .hud-keyhint { display: none; }
+  .hud-chips { gap: 4px; }
+  .hud-chip { font-size: 9px; padding: 2px 6px; }
+
+  /* Thumb-sized targets. 44px is the documented minimum and the minimum is
+     not a target — these are the controls you fly with. */
+  .touch-pad { min-width: 66px; height: 52px; font-size: 12px; }
+  .touch-pads { right: 84px; bottom: 22px; gap: 10px; }
+  .touch-stick { width: 136px; height: 136px; left: 14px; bottom: 14px; }
+  .touch-knob { width: 56px; height: 56px; margin: -28px 0 0 -28px; }
+  .touch-throttle { width: 58px; height: 164px; right: 14px; bottom: 14px; }
+
+  /* The tray buttons are the only way to reach half the game on a phone. */
+  .hud-btn { min-width: 46px; min-height: 46px; }
+
+  /* Menus: full width, bigger hit areas, no hover-only affordances. */
+  /* Four labels plus a balance do not fit across a 360 px phone, so the
+     switcher drops to icons only. The icons were drawn to be readable at this
+     size, which is why the rotor bar runs the full width of the helicopter. */
+  .switcher button:where(.switch-btn) { padding: 9px 11px; }
+  .switcher button:where(.switch-btn) span { display: none; }
+  .menu-bar { padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); }
+  .credit-pill { padding: 8px 11px; font-size: 13px; }
+  .screen { padding: 12px 10px 84px; }
+  .screen-head h2 { font-size: 20px; }
+  .start-opt, .fleet-card { padding: 12px; }
+  .fleet-art-slot { width: 92px; }
+  button.primary.big { padding: 16px; font-size: 17px; }
+  .free-bar { padding: 8px 10px; }
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { flex: 0 0 auto; }
+}
+
+/* Landscape phones are short, not narrow — the vertical budget is what runs
+   out first, so the bottom strip folds away entirely. */
+@media (pointer: coarse) and (max-height: 460px) {
+  .hud-bottom { display: none; }
+  .minimap, .minimap-canvas { width: 96px; height: 96px; }
+  .hud-left { left: 110px; }
+}
+
+/* ---- Hangar: rank, credits, unlocks, board ------------------------------ */
+.rank-card {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px; border-radius: var(--radius);
+  border: 1px solid var(--panel-line); background: var(--panel);
+}
+.rank-badge {
+  flex: 0 0 auto; padding: 10px 16px; border-radius: 10px;
+  background: linear-gradient(150deg, rgba(88,198,255,0.24), rgba(125,255,180,0.14));
+  border: 1px solid rgba(88,198,255,0.45);
+  font-size: 16px; font-weight: 700; color: var(--text);
+}
+.rank-meat { flex: 1 1 auto; min-width: 0; }
+.rank-line { font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
+.rank-line b { color: var(--text); font-size: 15px; }
+.rank-bar { height: 7px; border-radius: 99px; background: rgba(255,255,255,0.09); overflow: hidden; }
+.rank-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, #58c6ff, #7ee8b2); transition: width 0.4s ease; }
+
+.unlock-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.unlock {
+  text-align: left; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--panel-line); background: var(--panel); color: var(--text); cursor: pointer;
+}
+.unlock strong { display: block; font-size: 13px; font-weight: 640; }
+.unlock em { display: block; font-style: normal; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.unlock.is-owned { border-color: rgba(125,255,180,0.5); background: rgba(125,255,180,0.10); cursor: default; }
+.unlock.can-buy { border-color: rgba(88,198,255,0.55); }
+.unlock.is-locked { opacity: 0.62; }
+
+.board { display: grid; gap: 4px; }
+.board-row {
+  display: grid; grid-template-columns: 26px 1fr auto auto; gap: 10px; align-items: baseline;
+  padding: 7px 10px; border-radius: 8px; background: rgba(255,255,255,0.04); font-size: 13px;
+}
+.board-pos { color: var(--accent); font-weight: 700; }
+.board-score { font-weight: 680; }
+.board-date { color: var(--text-dim); font-size: 11px; }
+
+.code-row { display: flex; gap: 8px; }
+.code-row input {
+  flex: 1 1 auto; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--panel-line); background: rgba(255,255,255,0.05);
+  color: var(--text); font: inherit; letter-spacing: 0.08em; text-transform: uppercase;
+}
+
+.games-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.game-card {
+  display: block; padding: 11px 13px; border-radius: 10px; text-decoration: none;
+  border: 1px solid var(--panel-line); background: var(--panel); color: var(--text);
+}
+.game-card strong { display: block; font-size: 13px; font-weight: 640; }
+.game-card em { display: block; font-style: normal; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.game-card.is-here { border-color: rgba(88,198,255,0.55); background: rgba(88,198,255,0.12); }
+.game-card.is-soon { opacity: 0.55; border-style: dashed; }
+/* An aeroplane you have not earned yet. */
+.fleet-card.is-locked { opacity: 0.55; }
+.fleet-lock {
+  display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 99px;
+  background: rgba(255, 176, 32, 0.16); border: 1px solid rgba(255, 176, 32, 0.45);
+  color: #ffc95e; font-size: 10.5px; font-weight: 640;
+}
+
+/* Hidden mission cards must actually disappear.
+   .mission-card sets `display: flex`, which outranks the user-agent [hidden]
+   rule — so `card.hidden = true` would set the attribute and change nothing at
+   all. The fleet gate works only because .fleet-card never sets display. */
+.mission-card[hidden] { display: none !important; }
+
+/* ---- Dev mode: the workbench behind a passcode ---- */
+.dev-panel {
+  margin: 10px 0 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 198, 92, 0.42);
+  background: rgba(255, 198, 92, 0.07);
+  display: grid;
+  gap: 10px;
+}
+.dev-panel .check { align-items: flex-start; }
+.dev-panel .check span { line-height: 1.45; }
+.dev-panel .check strong { color: #ffd98a; }
+.dev-panel button.ghost { justify-self: start; }
+
+/* The mission clock, beside the objective title. */
+.hud-objective-clock {
+  font-size: 13px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.hud-objective-clock.is-warn { color: var(--amber); }
+.hud-objective-clock.is-bad { color: var(--red); }
+
+/* ---- Damage: where you were hit --------------------------------------- */
+.hud-damage {
+  position: absolute;
+  right: 16px;
+  top: 132px;
+  width: 92px;
+  padding: 8px 6px 6px;
+  border-radius: 12px;
+  background: rgba(12, 20, 32, 0.6);
+  border: 1px solid rgba(255, 106, 90, 0.35);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  text-align: center;
+  pointer-events: none;
+}
+.hud-damage svg { width: 68px; height: 68px; display: block; margin: 0 auto; }
+/* Undamaged is a faint outline, so the shape reads as an aeroplane before
+   anything has gone wrong with it. */
+.hud-damage path {
+  fill: rgba(160, 190, 220, 0.16);
+  stroke: rgba(180, 205, 235, 0.4);
+  stroke-width: 1.2;
+  transition: fill 220ms ease;
+}
+.hud-damage path.is-light { fill: rgba(255, 194, 71, 0.45); }
+.hud-damage path.is-hurt { fill: rgba(255, 140, 60, 0.75); }
+.hud-damage path.is-bad {
+  fill: rgba(255, 86, 70, 0.9);
+  animation: dmgPulse 1s ease-in-out infinite;
+}
+@keyframes dmgPulse { 50% { fill: rgba(255, 140, 120, 0.55); } }
+.hud-damage-label {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--red);
+}
+.hud.is-touch .hud-damage { top: 196px; right: 12px; width: 76px; }
+.hud.is-touch .hud-damage svg { width: 54px; height: 54px; }
+
+/* ---- Mayday ----------------------------------------------------------- */
+.hud-btn.is-brace { color: var(--red); }
+.hud-btn.is-brace svg { stroke: var(--red); }
+
+/*
+ * There is deliberately NO letterbox and nothing is faded out.
+ *
+ * The first version dimmed every readout and put black bars over the view,
+ * and it made the one moment where you most want to see what is happening the
+ * one moment you could not. The interface stays.
+ */
+
+/* ---- Saved-flight slots: a clear button a finger can hit --------------- */
+.slot { position: relative; }
+.slot-clear {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 26px;
+  height: 26px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 8px;
+  font-size: 17px;
+  color: var(--text-dim);
+  background: rgba(10, 16, 26, 0.55);
+  border: 1px solid var(--panel-line);
+}
+.slot-clear:hover { color: var(--red); border-color: rgba(255, 106, 90, 0.6); }
+/* A brief flash so a long-press that overwrote something says that it did. */
+.slot.is-saved { outline: 2px solid var(--good); outline-offset: -2px; }
+/*
+ * A finger is about 44 px. 26 is fine for a mouse and far too small for the
+ * iPads this is played on — and this button is the ONLY way to clear a slot
+ * on a touchscreen, so missing it means the feature is still unreachable.
+ */
+@media (pointer: coarse) {
+  .slot-clear { width: 44px; height: 44px; line-height: 42px; font-size: 22px; }
+}
+html.is-touch-device .slot-clear {
+  width: 44px;
+  height: 44px;
+  line-height: 42px;
+  font-size: 22px;
+}
+
+/*
+ * The minimap runs off the same instruments as everything else. When they are
+ * out it flashes rather than quietly showing a position it cannot know.
+ */
+.minimap.is-faulty {
+  border-color: rgba(255, 106, 90, 0.9);
+  animation: minimapFault 1s steps(1, end) infinite;
+}
+.minimap.is-faulty .minimap-canvas { opacity: 0.35; }
+@keyframes minimapFault {
+  50% { border-color: rgba(255, 106, 90, 0.25); }
+}
+
+/* ---- The emergency choice: two lines, two keys ------------------------ */
+.hud-choice {
+  position: absolute;
+  left: 50%;
+  bottom: 22%;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 8px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(10, 16, 26, 0.82);
+  border: 1px solid rgba(255, 106, 90, 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;
+  z-index: 7;
+}
+.hud-choice-row { display: flex; align-items: center; gap: 12px; }
+.hud-choice kbd {
+  min-width: 30px;
+  height: 30px;
+  line-height: 28px;
+  text-align: center;
+  border-radius: 7px;
+  border: 1px solid var(--panel-line);
+  background: rgba(255, 255, 255, 0.08);
+  font-weight: 700;
+  color: var(--text);
+}
+.hud-choice strong { display: block; font-size: 15px; }
+.hud-choice em { font-style: normal; font-size: 12px; color: var(--text-dim); }
+
+/* =========================================================================
+   PHONE LAYOUT — last in the file on purpose
+   -------------------------------------------------------------------------
+   There were two competing phone layouts in here and the older one was
+   winning on source order, so half of these rules did nothing. This is the
+   one that decides, and it is last so it stays that way.
+
+   Photographed at 375x812 before it: the top third of the screen was a
+   pile-up — minimap, objective block, instrument chips and button tray all
+   drawn over each other, the heading half off the right edge, a coaching
+   toast on top of the lot. The rudder was display:none, so a phone had no
+   rudder at all.
+
+   The rule is that the sky is the screen. Everything lives in a band at the
+   very top or the very bottom, nothing overlaps, nothing runs off the edge,
+   and every target is at least 44px.
+   ========================================================================= */
+@media (max-width: 560px) {
+  /* --- top band --------------------------------------------------------- */
+  /* Plain `.minimap`: it is appended to #ui, NOT inside .hud, so every
+     `.hud .minimap` rule aimed at it has always missed. */
+  .minimap {
+    top: 6px !important;
+    left: 6px !important;
+    right: auto !important;
+    bottom: auto !important;
+    width: 84px !important;
+    height: 84px !important;
+  }
+  .minimap-canvas { width: 84px !important; height: 84px !important; }
+  .minimap-scale { font-size: 8px; bottom: 2px; }
+
+  .hud.is-touch .hud-buttons { top: 6px; right: 6px; bottom: auto; gap: 6px; }
+
+  .hud.is-touch .hud-left {
+    /* The tray is 150px wide sitting at right:6, so the strip has to stop
+       before 219 or it runs underneath it. */
+    left: 96px; right: 162px; top: 6px;
+    min-width: 0; width: auto;
+    display: flex; gap: 6px; justify-content: center; padding: 6px 8px;
+  }
+  .hud.is-touch .hud-left .hud-readout { flex: 1 1 0; min-width: 0; }
+  .hud.is-touch .hud-readout-value { font-size: 18px; }
+  .hud.is-touch .hud-readout-label { font-size: 8px; letter-spacing: 0.05em; }
+  .hud.is-touch .hud-right { display: none; }
+
+  /* --- objective: one line, under the band, and inside the screen -------- */
+  .hud.is-touch .hud-top {
+    top: 96px;
+    left: 6px;
+    right: 6px;
+    width: auto;
+    max-width: none;
+    /* The desktop layout centres this with a translate. At phone width that
+       put its left edge 125px off the side of the screen. */
+    transform: none;
+    padding: 0;
+  }
+  .hud.is-touch .hud-objective { max-width: none; padding: 7px 10px; text-align: left; }
+  .hud.is-touch .hud-objective-title { font-size: 10px; }
+  .hud.is-touch .hud-objective-text {
+    font-size: 12px; line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  /*
+   * Both of these are centred with a translate on the desktop layout, which
+   * at phone width walks them off the left edge — photographed: the tower's
+   * callsign reading "EL TOWER" with the rest of it past the bezel. Pinned to
+   * both edges instead, and stacked so the coaching line sits above the
+   * radio rather than on the control pads.
+   */
+  .hud.is-touch .hud-coach {
+    /* Above the radio at its TALLEST. A three-line clearance is 98px, and
+       at 268 the coaching line was sitting inside it. */
+    top: auto; bottom: 330px; left: 8px; right: 8px;
+    transform: none; max-width: none; font-size: 12px; text-align: center;
+  }
+  .hud.is-touch .hud-subtitle {
+    bottom: 216px; left: 8px; right: 8px;
+    transform: none; max-width: none; font-size: 13px;
+  }
+  /* The strip starts after the map with a real gap, not against it. */
+  .hud.is-touch .hud-left { left: 100px; }
+  .hud.is-touch .hud-bottom { display: none; }
+
+  /* --- bottom band ------------------------------------------------------ */
+  .hud.is-touch .touch-stick { width: 116px; height: 116px; left: 8px; bottom: 8px; }
+  .hud.is-touch .touch-knob { width: 48px; height: 48px; margin: -24px 0 0 -24px; }
+  .hud.is-touch .touch-throttle { width: 52px; height: 150px; right: 8px; bottom: 8px; }
+
+  /*
+   * Four pads in one row across a phone is 38px each, which is under the
+   * minimum and feels like it. Two rows of two gives each of them 80px.
+   */
+  .hud.is-touch .touch-pads {
+    left: 132px; right: 68px; bottom: 60px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  }
+  .hud.is-touch .touch-pad {
+    min-width: 0; width: auto; height: 44px; font-size: 11px; padding: 0 4px;
+  }
+
+  /*
+   * The rudder is back. A phone has no keyboard, so without it there is no
+   * way to straighten the aeroplane in a crosswind — which is most landings.
+   * A wide shallow bar along the bottom, between the stick and the throttle.
+   */
+  .touch-rudder {
+    display: block !important;
+    position: absolute;
+    left: 132px; right: 68px; bottom: 8px;
+    width: auto; height: 44px;
+    /* The desktop rudder is centred with a translate, which slid this one
+       back under the stick however its left edge was set. */
+    transform: none;
+  }
+  .touch-rudder-label { font-size: 8px; }
+
+  /*
+   * The approach-slope call. It sits at bottom:84 by default, which on a
+   * phone is directly on top of the BRAKES and FLAPS pads — photographed with
+   * "Too high" printed across both of them. It goes above the radio with the
+   * other things that talk to you.
+   */
+  .hud.is-touch .hud-papi {
+    bottom: 380px; left: 8px; right: 8px;
+    width: auto; transform: none; text-align: center;
+  }
+
+  .hud.is-touch .hud-damage { top: 96px; right: 6px; width: 58px; padding: 5px 4px 4px; }
+  .hud.is-touch .hud-damage svg { width: 44px; height: 44px; }
+  .hud.is-touch .hud-damage-label { font-size: 8px; }
+}
+
+/* ======================================================================
+ * THREE MORE GAMES.
+ *
+ * The boat's panel, the courier's strip, the helicopter's hover rows and
+ * the driving pedals. Each block was written by the person who wrote the
+ * panel above it; they are appended in the order the games were added.
+ * ====================================================================== */
+
+
+/* ===================== Vehicle HUD: the boat and the car ================= */
+/*
+ * `is-vehicle` has been going on the HUD wrapper since the boat went in, and
+ * until now this stylesheet had not one rule for it. That is why taking the
+ * boat out still showed a GEAR DOWN chip, a FLAPS 0 chip, an EASY MODE chip, a
+ * fuel bar stopped dead at whatever the last flight left it on, an autopilot
+ * button that did nothing and a little damage diagram of an aeroplane. It was
+ * never the missing missions that made the boat read as a toy inside the
+ * flight sim. It was the gear chip.
+ *
+ * Everything aeroplane-only is tagged .is-air in hud.js build(); this is the
+ * rule that takes it away, and it keeps working for whatever gets added next.
+ */
+.hud.is-vehicle .is-air,
+.hud.is-vehicle .hud-damage,
+.hud.is-vehicle .hud-vital,
+.hud.is-vehicle .hud-papi,
+.hud.is-vehicle .hud-stall { display: none !important; }
+
+/* A car has brakes and a boat does not, so this one is boat-only. */
+.hud.is-boat .is-wheels { display: none !important; }
+
+/* The aeroplane's instrument strip steps aside for the boat's own panel.
+   Matched on :not(.hud-boatpanel) because the boat panel wears .hud-left too,
+   so that every responsive and touch rule written for the strip applies to it
+   without being written twice. */
+.hud.is-boat .hud-left:not(.hud-boatpanel) { display: none !important; }
+.hud-boatpanel { display: none; }
+.hud.is-boat .hud-boatpanel { display: block; }
+
+/* ---- Depth under the keel: the boat's altimeter ---- */
+.hud-boatpanel .hud-row.is-depth .hud-value { font-size: 34px; }
+.hud-boatpanel.is-shoal .hud-row.is-depth .hud-value,
+.hud-boatpanel.is-shoal .hud-row.is-depth .hud-word { color: var(--amber); }
+.hud-boatpanel.is-shallow .hud-row.is-depth .hud-value,
+.hud-boatpanel.is-shallow .hud-row.is-depth .hud-word { color: var(--red); }
+.hud-boatpanel.is-shallow .hud-row.is-depth .hud-word {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+/* The whole panel takes the warning, not just the number. You are not reading
+   the panel when this matters — you are looking out of the window — and the
+   edge of a box changing colour is something you catch without reading. */
+.hud-boatpanel.is-shallow { border-color: rgba(255, 106, 90, 0.55); }
+.hud-boatpanel .hud-value.is-aground { font-size: 19px; color: var(--red); }
+
+/* ---- The engine lever ---- */
+.hud-lever { padding: 7px 0 2px; border-top: 1px solid rgba(140, 180, 230, 0.1); }
+.hud-lever-detents { display: flex; gap: 3px; margin-top: 5px; }
+.hud-lever-detent {
+  flex: 1 1 0;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 5px 2px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  background: rgba(140, 180, 230, 0.07);
+  border: 1px solid transparent;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.hud-lever-detent.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+}
+/* Astern is amber, not red. Going astern is a normal thing you do coming
+   alongside, and colouring it like a failure teaches the child to avoid the
+   one control that gets them off the putty. */
+.hud-lever-detent.is-on.is-astern { background: var(--amber); border-color: var(--amber); }
+
+/* ---- Who is aboard ---- */
+/* The [hidden] rule is not optional: display:flex beats the attribute, the
+   same trap the .fatal[hidden] comment further up this file describes. */
+.hud-aboard {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(140, 180, 230, 0.1);
+}
+.hud-aboard[hidden] { display: none; }
+.hud-aboard-pips { display: flex; gap: 5px; }
+.hud-pip { display: inline-block; }
+.hud-pip svg { width: 13px; height: 19px; display: block; }
+.hud-pip svg circle, .hud-pip svg path { fill: rgba(159, 178, 204, 0.22); }
+.hud-pip.is-on svg circle, .hud-pip.is-on svg path { fill: var(--accent-2); }
+.hud-pip.is-on { animation: pipIn 0.45s ease; }
+@keyframes pipIn {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.18); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* ---- The compass ribbon ---- */
+.hud-ribbon {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(460px, 46vw);
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  background: rgba(12, 20, 34, 0.55);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.hud-ribbon-canvas { flex: 1 1 auto; min-width: 0; height: 26px; }
+.hud-ribbon-value {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--accent-2);
+}
+/* The objective panel drops below the tape. Without this the shout and the
+   compass sit on top of each other at the top of the screen. */
+.hud.is-boat .hud-top { top: 46px; }
+
+/* ---- Sea state, under the wind ---- */
+.hud-sea { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.hud-sea.is-rough { color: var(--amber); }
+.hud-sea.is-gale { color: var(--red); font-weight: 700; }
+
+/* ---- On the putty ---- */
+.hud-aground {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  transform: translate(-50%, -50%);
+  max-width: min(420px, 80vw);
+  padding: 13px 22px;
+  text-align: center;
+  border-radius: 14px;
+  background: rgba(28, 21, 10, 0.88);
+  border: 1px solid rgba(255, 194, 71, 0.55);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.hud-aground strong { display: block; font-size: 18px; color: var(--amber); }
+.hud-aground em {
+  display: block;
+  font-style: normal;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 5px;
+}
+
+/* ---- Small screens: the tape goes, the number stays ----
+   A 120-degree compass card needs about 300 px to be readable and an iPad in
+   portrait does not have it to spare at the top of the screen. Losing the tape
+   and keeping the bearing is much better than keeping an unreadable tape. */
+@media (max-width: 760px) {
+  .hud-ribbon { width: auto; padding: 0 10px; height: 26px; }
+  .hud-ribbon-canvas { display: none; }
+  .hud.is-boat .hud-top { top: 40px; }
+  .hud-boatpanel .hud-row.is-depth .hud-value { font-size: 27px; }
+  .hud-lever-detent { font-size: 8px; padding: 4px 1px; }
+}
+
+
+
+/* =====================================================================
+ * DRIVING — Island Courier
+ *
+ * Appended to styles/main.css. Everything here is inside .hud.is-drive or
+ * [data-game="car"], so not one rule can reach an aeroplane.
+ *
+ * Two of these rules are not decoration and must not be "tidied away":
+ * the [hidden] pair at the top. Elements the JavaScript hides with .hidden =
+ * true carry no inline style, and the browser's own [hidden] { display: none }
+ * is a plain attribute selector — so a class rule that sets display, such as
+ * .hud-row { display: grid }, wins and the element stays on screen. The
+ * vertical-speed row and the fuel bar are both in that position: hidden in
+ * script, visible on screen, which looks exactly like the hide never ran.
+ * ===================================================================== */
+
+.hud-row[hidden],
+.hud-bar[hidden] { display: none !important; }
+
+/* -- the left strip ------------------------------------------------- */
+
+/* Speed is the number you steer by, so it gets the room the altimeter had. */
+.hud.is-drive .hud-left .hud-value { font-size: 30px; }
+.hud.is-drive .hud-word { color: var(--text-dim); text-transform: lowercase; }
+
+/*
+ * The surface under the wheels, in one word, under the speed.
+ *
+ * Colour does the work a sentence would: tarmac is calm, gravel and sand are
+ * warm, water is wrong. This is the entire explanation a child gets of why the
+ * van just slid wide on the hairpin, and it is one text node.
+ */
+.hud.is-drive .hud-word[data-surface="tarmac"],
+.hud.is-drive .hud-word[data-surface="road"],
+.hud.is-drive .hud-word[data-surface="apron"],
+.hud.is-drive .hud-word[data-surface="runway"] { color: var(--accent); }
+.hud.is-drive .hud-word[data-surface="gravel"],
+.hud.is-drive .hud-word[data-surface="track"] { color: var(--amber); }
+.hud.is-drive .hud-word[data-surface="grass"] { color: var(--good); }
+.hud.is-drive .hud-word[data-surface="sand"] { color: #e8c37a; }
+.hud.is-drive .hud-word[data-surface="water"] { color: var(--red); }
+
+/* -- the clock, top centre ------------------------------------------ */
+
+/*
+ * Shared with the flight missions' clock, deliberately: one clock element in
+ * the game rather than two that can disagree. In driving it is bigger and in
+ * the mono face, because it is read at a glance at speed rather than studied.
+ */
+.hud.is-drive .hud-objective {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 2px;
+  text-align: left;
+}
+.hud.is-drive .hud-objective-title { grid-column: 1 / -1; margin-bottom: 0; }
+.hud.is-drive .hud-objective-clock {
+  grid-column: 1;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 620;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+.hud.is-drive .hud-objective-clock.is-bad { animation: courierPulse 1s ease-in-out infinite; }
+.hud.is-drive .hud-objective-text { grid-column: 1 / -1; font-size: 14px; }
+@keyframes courierPulse { 50% { opacity: 0.45; } }
+
+/* -- the load -------------------------------------------------------- */
+
+/*
+ * Five pips, beside the clock. This is the whole design in one instrument:
+ * the clock says go faster and the pips say do not. A load delivered at full
+ * condition pays double, so flooring it everywhere is a legal strategy that
+ * earns badly — which is the thing a ten-year-old should work out for
+ * themselves, and no text on this screen ever says it.
+ */
+.hud-cargo { grid-column: 2; display: flex; flex-direction: column; gap: 4px; }
+.hud-cargo-label {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.hud-cargo.is-care .hud-cargo-label { color: var(--amber); }
+.hud-cargo.is-ruined .hud-cargo-label { color: var(--red); }
+.hud-cargo-pips { display: flex; gap: 5px; }
+.hud-cargo-pip {
+  width: 20px;
+  height: 8px;
+  border-radius: 3px;
+  background: var(--good);
+  box-shadow: 0 0 8px rgba(79, 214, 132, 0.45);
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+.hud-cargo.is-care .hud-cargo-pip { background: var(--amber); box-shadow: 0 0 8px rgba(255, 194, 71, 0.45); }
+.hud-cargo-pip.is-out { background: rgba(255, 255, 255, 0.14); box-shadow: none; }
+/* A knock you can see out of the corner of your eye, once, briefly. */
+.hud-cargo.is-hit { animation: cargoKnock 0.36s ease; }
+@keyframes cargoKnock {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  60% { transform: translateX(2px); }
+}
+
+/* -- the next turn --------------------------------------------------- */
+
+/*
+ * The single most important element on the driving screen.
+ *
+ * Ten-year-olds cannot read a minimap and steer at the same time; they can read
+ * one arrow. Bottom centre, above the thumbs on a tablet, and nothing else is
+ * allowed to live there.
+ */
+.hud-chevron {
+  position: absolute;
+  left: 50%;
+  bottom: 104px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px 10px 16px;
+  border-radius: 18px;
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  transition: transform 0.16s ease, border-color 0.2s ease;
+}
+.hud-chevron-arrow { font-size: 40px; line-height: 0.9; color: var(--accent); }
+.hud-chevron-words { display: flex; flex-direction: column; gap: 2px; }
+.hud-chevron-what {
+  font-size: 19px;
+  font-weight: 680;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.hud-chevron-dist { font-size: 13px; color: var(--text-dim); font-family: var(--mono); }
+.hud-chevron[data-dir="arrive"] .hud-chevron-arrow,
+.hud-chevron[data-dir="uturn"] .hud-chevron-arrow { color: var(--amber); }
+/* Close enough to act on: it grows and warms. Distance, not time, so it reads
+   the same whether you are creeping up to it or arriving at 90. */
+.hud-chevron.is-near {
+  transform: translateX(-50%) scale(1.1);
+  border-color: rgba(255, 194, 71, 0.55);
+}
+.hud-chevron.is-near .hud-chevron-arrow { color: var(--amber); }
+
+/* Hidden with the rest of the interface, and dark in a blackout, exactly like
+   every other panel — otherwise the one element the player is actually reading
+   is the one that ignores both. */
+.hud.is-minimal .hud-chevron { opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+.hud.is-blackout .hud-chevron { opacity: 0.12; }
+
+/* -- small screens and tablets --------------------------------------- */
+
+@media (max-width: 900px) {
+  .hud.is-drive .hud-objective-clock { font-size: 24px; }
+  .hud-chevron { bottom: 88px; padding: 8px 16px 8px 12px; }
+  .hud-chevron-arrow { font-size: 32px; }
+  .hud-chevron-what { font-size: 16px; }
+  .hud-cargo-pip { width: 16px; height: 7px; }
+}
+/* On a tablet the thumbs own the bottom corners, so the chevron sits above
+   them rather than under a hand. */
+.hud.is-touch .hud-chevron { bottom: 210px; }
+@media (max-height: 560px) {
+  .hud.is-touch .hud-chevron { bottom: 168px; }
+}
+
+/* -- the menu, per game ---------------------------------------------- */
+
+/*
+ * One attribute on the menu root, set by setGame(). The courier is warmer than
+ * the flight school: road amber rather than sky blue, and it is two lines of
+ * CSS rather than a second stylesheet.
+ */
+.menu-layer { --game-accent: var(--accent); }
+[data-game="car"] .menu-layer { --game-accent: var(--amber); }
+[data-game="boat"] .menu-layer { --game-accent: var(--accent-2); }
+[data-game="heli"] .menu-layer { --game-accent: #ff9d6a; }
+
+/*
+ * And enough of it to feel like somewhere else.
+ *
+ * The first version tinted the brand mark and the tagline and nothing else, so
+ * the four games were the same grey screen with a different sentence at the
+ * top. A child arriving at the boat should be able to tell, without reading
+ * anything, that this is not where they were. The accent is one variable and
+ * these are the places it shows: the mark, the strapline, the icon on every
+ * card, the frame of the card under a finger, and a wash behind the whole
+ * page. Nothing here reaches a screen that is not the front page of a game.
+ */
+.screen-main .brand-mark,
+.screen-main .tagline { color: var(--game-accent); }
+.screen-main .card-btn .card-icon { color: var(--game-accent); }
+.screen-main .card-btn:hover,
+.screen-main .card-btn:focus-visible {
+  border-color: color-mix(in srgb, var(--game-accent) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--game-accent) 30%, transparent) inset;
+}
+/*
+ * The wash. Deliberately weak — 7% at the top corner, gone by the middle of
+ * the page — because the thing it must not do is fight the text over it on a
+ * school laptop with the brightness turned down.
+ */
+.screen-main::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 80% at 12% -10%, color-mix(in srgb, var(--game-accent) 7%, transparent), transparent 60%);
+}
+.screen-main { position: relative; }
+
+/* The measured line under a map card — "31 km of road, a coast loop, a 240 m
+   climb to the relay". Written only when something has actually measured it. */
+.map-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--amber);
+  font-family: var(--mono);
+  letter-spacing: 0.01em;
+}
+
+/* -- touch, driving --------------------------------------------------- */
+
+/*
+ * The flight stick is wrong for a van: it is a two-axis dial and a car has one
+ * axis. In drive mode it becomes a wide, short steering slider under the left
+ * thumb, the rudder strip goes (there is nothing to yaw), and the pads that
+ * belong to an aeroplane go with it.
+ */
+.touch-layer.is-drive .touch-rudder { display: none; }
+.touch-layer.is-drive .touch-stick {
+  width: min(280px, 46vw);
+  height: 92px;
+  border-radius: 46px;
+}
+/* The dashed guide inside the dial is a ::after that is already there; it is
+   reshaped into a pill rather than given new content, because overriding half
+   of somebody else's pseudo-element is how you end up with a dashed circle
+   round a word. */
+.touch-layer.is-drive .touch-stick::after { inset: 10px 14px; border-radius: 40px; }
+.touch-layer.is-drive .touch-throttle-label::after { content: ' GO'; }
+
+/* ===================== The helicopter's hover strip ======================
+ *
+ * The aeroplane's four readings and this panel are never on screen together:
+ * `is-rotorhover` swaps one for the other, and the swap is driven by
+ * groundspeed with hysteresis so it cannot flicker while you slow down.
+ *
+ * Nothing in here is loaded, animated or laid out until a rotorcraft is
+ * actually flown — the JavaScript builds the nodes on first use, so a child
+ * who only flies the trainer pays nothing for any of it.
+ * ===================================================================== */
+
+/* Hidden by default; the class on the wrapper is the only thing that shows it.
+   Written as display so it costs no compositing while an aeroplane is flying. */
+.hud-rotor { display: none; left: 16px; top: 16px; width: 246px; }
+.hud.is-rotorhover .hud-rotor { display: block; }
+.hud.is-rotorhover .hud-left { display: none; }
+
+.hud-rotor-head {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--accent-2);
+  margin-bottom: 8px;
+}
+
+.hud-rotor-top { display: flex; gap: 10px; align-items: stretch; }
+
+/* ---- The drift cross ---------------------------------------------------
+ *
+ * A dot in a box. Centre it. That is the whole instrument, and it is the
+ * biggest thing on the panel because it is the thing the game is about.
+ */
+.hud-drift { position: relative; width: 112px; height: 112px; flex: 0 0 auto; }
+
+/* The hold arc rings the box rather than living somewhere else on the panel,
+   so "centre the dot" and "watch it fill" are one glance and not two. */
+.hud-drift-arc { position: absolute; inset: -6px; width: calc(100% + 12px); height: calc(100% + 12px); }
+.hud-drift-arc circle {
+  fill: none;
+  stroke-width: 5;
+  /* Starts at the top and fills clockwise, which is how a clock does it and
+     therefore the only direction that needs no explaining. */
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+}
+.hud-drift-arc-bg { stroke: rgba(140, 180, 230, 0.16); }
+.hud-drift-arc-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.12s linear;
+}
+.hud-drift-arc-fill.is-full { stroke: var(--good); }
+
+.hud-drift-box {
+  position: absolute;
+  inset: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-line);
+  background: rgba(6, 12, 22, 0.55);
+  overflow: hidden;
+}
+.hud-drift-box.is-good { border-color: rgba(79, 214, 132, 0.75); background: rgba(12, 40, 26, 0.5); }
+
+/* The tolerance ring: inside it the winch is happy. Sized from the constants
+   in hud-rotor.js at build time, so the picture cannot disagree with the rule. */
+.hud-drift-tol {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px dashed rgba(126, 232, 178, 0.5);
+}
+/* A faint cross, so "centred" is a place and not a guess. */
+.hud-drift-cross {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to right, transparent calc(50% - 0.5px), rgba(140, 180, 230, 0.22) calc(50% - 0.5px), rgba(140, 180, 230, 0.22) calc(50% + 0.5px), transparent calc(50% + 0.5px)),
+    linear-gradient(to bottom, transparent calc(50% - 0.5px), rgba(140, 180, 230, 0.22) calc(50% - 0.5px), rgba(140, 180, 230, 0.22) calc(50% + 0.5px), transparent calc(50% + 0.5px));
+}
+
+/* The layer that moves. See the long comment in hud-rotor.js: percentages in
+   a transform are percentages of the element's own box, so the thing that
+   moves has to be the size of the box or the instrument does nothing. */
+.hud-drift-slide { position: absolute; inset: 0; will-change: transform; }
+.hud-drift-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(88, 198, 255, 0.8);
+}
+.hud-drift-box.is-good .hud-drift-dot { background: var(--good); box-shadow: 0 0 12px rgba(79, 214, 132, 0.9); }
+/* Off the scale: the dot squares off, so "pegged" does not read as "steady at
+   the edge". */
+.hud-drift-dot.is-pegged { border-radius: 3px; background: var(--amber); box-shadow: 0 0 10px rgba(255, 194, 71, 0.9); }
+
+.hud-drift-info { margin-top: 8px; }
+.hud-drift-cap { font-size: 10px; letter-spacing: 0.1em; color: var(--text-dim); }
+.hud-drift-read { font-size: 24px; font-weight: 640; line-height: 1.05; }
+.hud-drift-read span { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+.hud-rotor .hud-word.is-warn { color: var(--amber); }
+
+/* ---- Vertical speed, up the side of the box ----------------------------
+ *
+ * Up on the screen is up in the air. A number that changes every frame cannot
+ * be read; a bar that is above or below the middle can be read without
+ * reading, which is the whole point of having it at all.
+ */
+.hud-vsbar { width: 18px; flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; }
+.hud-vsbar-track {
+  position: relative;
+  width: 9px;
+  height: 112px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+/* The middle line is zero. */
+.hud-vsbar-track::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 50%;
+  height: 1px;
+  background: rgba(234, 241, 251, 0.45);
+}
+.hud-vsbar-fill {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 50%;
+  height: 0;
+  background: var(--accent-2);
+  transition: height 0.08s linear, bottom 0.08s linear;
+}
+.hud-vsbar-fill.is-bad { background: var(--red); }
+.hud-vsbar-cap { font-size: 9px; letter-spacing: 0.08em; color: var(--text-dim); margin-top: 4px; }
+
+/* ---- Radar altimeter and wind, in the column beside the box ------------ */
+.hud-rotor-side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.hud-ra-line { display: flex; align-items: baseline; gap: 4px; }
+.hud-ra-value { font-size: 30px; font-weight: 640; line-height: 1; letter-spacing: -0.02em; }
+.hud-ra-value.is-good { color: var(--good); }
+.hud-ra-value.is-warn { color: var(--amber); }
+
+/* Shown only when the winch has asked for a height. The track zooms to the
+   band rather than running from zero, so the marker moves a useful distance
+   for the height changes that actually matter. */
+.hud-ra-band {
+  position: relative;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.hud-ra-band-good { position: absolute; top: 0; bottom: 0; background: rgba(79, 214, 132, 0.42); }
+.hud-ra-band-mark {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: var(--text);
+  transition: left 0.1s linear;
+}
+
+.hud-rwind-body { display: flex; align-items: center; gap: 6px; }
+.hud-rwind-arrow { display: inline-block; font-size: 17px; line-height: 1; color: var(--accent); }
+.hud-rwind-text { font-size: 13px; font-family: var(--mono); color: var(--text-dim); }
+
+/* ---- Power, with the hover point marked --------------------------------
+ *
+ * The gap between the fill and the mark is the margin, and the margin is the
+ * one thing in this game you spend by being heavy. A percentage on its own
+ * does not show a margin; a gap does, and it visibly closes when you pick
+ * somebody up.
+ */
+.hud-power { margin-top: 10px; }
+.hud-power-track {
+  position: relative;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.hud-power-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #3ec96a, #9ae66e);
+  transition: width 0.1s linear;
+}
+.hud-power-fill.is-short { background: linear-gradient(90deg, #ff6a5a, #ffc247); }
+.hud-power-mark {
+  position: absolute;
+  top: -3px; bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.85;
+}
+.hud-power-read { margin-top: 4px; font-size: 11px; font-family: var(--mono); color: var(--text-dim); }
+
+/* ---- The three conditions ----------------------------------------------
+ *
+ * Three separate answers, not one score. When the arc stops filling the pilot
+ * needs to know WHICH of the three they lost; a single amber "not quite"
+ * tells a ten-year-old nothing they can act on.
+ */
+.hud-hold { margin-top: 10px; border-top: 1px solid rgba(140, 180, 230, 0.14); padding-top: 8px; }
+.hud-hold-lights { display: flex; gap: 5px; }
+.hud-hold-lt {
+  flex: 1 1 0;
+  text-align: center;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 4px 0;
+  border-radius: 6px;
+  border: 1px solid var(--panel-line);
+  color: var(--text-dim);
+}
+.hud-hold-lt.is-on { border-color: rgba(79, 214, 132, 0.7); background: rgba(79, 214, 132, 0.16); color: #d6ffe6; }
+.hud-hold-text { margin-top: 6px; font-size: 12px; color: var(--accent); }
+.hud-hold-text.is-good { color: var(--good); }
+
+/* Lives aboard and lives safe, on the objective panel — the only number this
+   game keeps. Hidden until there is somebody to count. */
+.hud-rescue { margin-top: 4px; font-size: 12px; font-family: var(--mono); color: var(--accent-2); }
+
+/* Hover assist, said out loud rather than hidden. A child who finds out later
+   that the machine was holding its own height has been cheated of the thing
+   they were proud of. */
+.hud-chip-assist.is-on { border-color: rgba(126, 232, 178, 0.6); color: #cdffe6; }
+
+/* ---- The three display modes the rest of the HUD already has ------------ */
+
+/* The realistic cockpit has its own instruments, so the overlay stands down.
+   Matches the existing rule for .hud-left / .hud-right / .hud-bottom. */
+.hud.is-minimal .hud-rotor { opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+
+.hud.is-contrast .hud-drift-read,
+.hud.is-contrast .hud-ra-value { color: #fff; }
+.hud.is-contrast .hud-rotor-head,
+.hud.is-contrast .hud-drift-cap,
+.hud.is-contrast .hud-power-read,
+.hud.is-contrast .hud-rwind-text { color: #fff; }
+.hud.is-contrast .hud-hold-text { color: #ffe95c; }
+.hud.is-contrast .hud-drift-box { background: #000; border-color: #fff; }
+
+.hud.is-large .hud-drift-read { font-size: 28px; }
+.hud.is-large .hud-ra-value { font-size: 35px; }
+.hud.is-large .hud-hold-text { font-size: 14px; }
+
+/* ---- Touch ------------------------------------------------------------
+ *
+ * Same reasoning as the aeroplane strip above: the buttons own the top right,
+ * the map owns the top left, so the instruments run along underneath in one
+ * band. The difference is that this panel has a picture in it, and the picture
+ * is the primary instrument — so the box keeps its size and everything else
+ * lays out along the row beside it rather than the box shrinking to fit.
+ */
+.hud.is-touch .hud-rotor {
+  left: 206px;
+  right: 8px;
+  top: 66px;
+  width: auto;
+  padding: 6px 10px;
+}
+.hud.is-touch.is-rotorhover .hud-rotor {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.hud.is-touch .hud-rotor-head { display: none; }
+.hud.is-touch .hud-drift { width: 84px; height: 84px; }
+.hud.is-touch .hud-vsbar-track { height: 84px; }
+.hud.is-touch .hud-drift-cap { display: none; }
+.hud.is-touch .hud-drift-info { margin-top: 0; width: 104px; flex: 0 0 auto; }
+.hud.is-touch .hud-drift-read { font-size: 17px; }
+.hud.is-touch .hud-rotor .hud-word { font-size: 10px; }
+.hud.is-touch .hud-ra-value { font-size: 22px; }
+.hud.is-touch .hud-power,
+.hud.is-touch .hud-hold { margin-top: 0; border-top: 0; padding-top: 0; }
+.hud.is-touch .hud-power { width: 108px; }
+.hud.is-touch .hud-hold { width: 150px; }
+.hud.is-touch .hud-hold-text { font-size: 10px; }
+
+ *  van is steered with one thumb held against a strip, not placed on a dial,
+ *  and both pedals have to be hittable without looking. 44 px is the minimum
+ *  anybody should ship; GO is 96 because it is the one held for whole minutes.
+ * ======================================================================== */
+
+.touch-wheel {
+  position: absolute;
+  left: 16px;
+  bottom: 18px;
+  width: min(46vw, 340px);
+  height: 92px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+  display: none;
+}
+.touch-wheel-centre {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  bottom: 12px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.16);
+}
+.touch-wheel-mark {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  bottom: 8px;
+  width: 54px;
+  margin-left: -27px;
+  border-radius: 12px;
+  background: rgba(88, 198, 255, 0.3);
+  border: 1px solid rgba(124, 199, 255, 0.75);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.touch-wheel.is-held .touch-wheel-mark { background: rgba(88, 198, 255, 0.52); }
+.touch-wheel-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -16px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.touch-pedals {
+  position: absolute;
+  right: 16px;
+  bottom: 18px;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: auto;
+}
+.touch-pedal {
+  width: 110px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.4);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #eaf2ff;
+  font: 600 15px/1 inherit;
+  letter-spacing: 0.1em;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.touch-pedal.is-go { height: 96px; }
+.touch-pedal.is-stop { height: 72px; }
+.touch-pedal.is-go.is-on { background: rgba(92, 214, 140, 0.42); border-color: rgba(120, 235, 170, 0.8); }
+.touch-pedal.is-stop.is-on { background: rgba(232, 96, 96, 0.42); border-color: rgba(255, 140, 140, 0.8); }
+
+/* A phone in landscape has no room for a 92 px strip and a 96 px pedal. */
+@media (max-height: 460px) {
+  .touch-wheel { height: 68px; bottom: 12px; }
+  .touch-pedal.is-go { height: 74px; }
+  .touch-pedal.is-stop { height: 58px; }
+  .touch-pedal { width: 92px; }
+}
+
+/*
+ * A job the island cannot offer.
+ *
+ * Greyed and unclickable with the reason under it, rather than hidden — a
+ * child who read about Coast Road on Kestrel and cannot find it anywhere is
+ * worse off than one who can see it and is told the lighthouse is across open
+ * water. The reason is the map talking about itself.
+ */
+.mission-card.is-unavailable { opacity: 0.55; }
+.mission-card.is-unavailable .primary { cursor: not-allowed; filter: grayscale(1); }
+.mission-why {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+.mission-card.is-unavailable .mission-why { color: var(--amber); }
+
+/* A map offered to a game it was not built for. */
+.map-borrowed {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.map-card.is-borrowed { opacity: 0.88; }
+
+/* ---- boat mode on a touchscreen ----------------------------------------
+ *
+ * The dial becomes a wheel and the slider becomes a handle: same elements,
+ * same glass, so nothing else in the layer has to know which game is on.
+ *
+ * These forty lines were written with the boat's touch lever and then never
+ * appended, so `.touch-lever` had no size, no position and no background — the
+ * one control that drives the boat on an iPad was an unstyled, unfindable box.
+ * Twenty-nine iPads is the whole class.
+ */
+.touch-stick.is-wheel { width: 208px; height: 92px; border-radius: 46px; }
+.touch-stick.is-wheel::after { inset: 12px 18px; border-radius: 40px; }
+.touch-stick.is-wheel .touch-knob { height: 62px; margin-top: -31px; border-radius: 26px; }
+
+.touch-lever {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  width: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 18px;
+  border: 1px solid var(--panel-line);
+  background: rgba(12, 20, 32, 0.34);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
+  z-index: 4;
+}
+.touch-detent {
+  /* 46, not 44: a thumb on a boat that is moving. */
+  height: 46px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #cfe3f5;
+  font-size: 13px;
+  font-weight: 640;
+  letter-spacing: 0.05em;
+  touch-action: none;
+}
+.touch-detent.is-on { background: rgba(88, 198, 255, 0.5); color: #061520; }
+/* Astern is the odd one out and should look it, both on the panel and in the
+   corner of an eye that is busy watching a quay. */
+.touch-detent[data-i='0'].is-on { background: rgba(255, 160, 90, 0.58); }
